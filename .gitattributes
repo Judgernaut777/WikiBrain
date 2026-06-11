@@ -1,0 +1,6 @@
+# Force LF for all text so the renderer's byte-deterministic output (and the
+# "zero git diff on re-render" guarantee) holds across platforms/checkouts.
+* text=auto eol=lf
+*.png binary
+*.jpg binary
+*.db binary

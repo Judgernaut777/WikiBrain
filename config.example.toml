@@ -1,0 +1,42 @@
+# wiki-brain configuration — copy this file to `config.toml` and edit.
+#
+#   cp config.example.toml config.toml      # (PowerShell: Copy-Item)
+#
+# `config.toml` is git-ignored so your machine-specific paths never get
+# committed. The live DB lives at an ABSOLUTE path OUTSIDE the working tree
+# (BUILD_SPEC.md §2) so scheduled-task worktrees all share one source of truth.
+
+[paths]
+# Where the live SQLite DB lives. `~` expands to your home dir. If you run the
+# brain from scheduled tasks under a different OS account, pin this to an
+# absolute path instead (e.g. "C:/Users/you/.wiki-brain/wiki.db") so it can't
+# drift when `~` resolves differently.
+db = "~/.wiki-brain/wiki.db"
+
+# Browser bookmark files to sync (Chrome "Bookmarks" JSON or Firefox places.sqlite).
+bookmarks = ["~/AppData/Local/Google/Chrome/User Data/Default/Bookmarks"]
+bookmark_folder = "wiki"        # only sync bookmarks under this browser folder
+
+# Optional: a folder you drop files into (PDF/DOCX/images/…) for `wiki drop`
+# to ingest. Created on first use.
+drop_folder = "~/wiki-brain-drop"
+
+[gate]
+auto_promote_confidence = 0.85  # claims at/above this may auto-promote
+machine_confidence_ceiling = 0.9  # cap on machine-origin claim confidence
+
+[budgets]
+queries_per_question = 4
+fetches_per_question = 5
+questions_per_night = 8
+fetches_per_night = 40
+
+[search]
+engine = "ddg"                  # "ddg" (no key) or "searxng" (self-hosted)
+searxng_url = "http://localhost:8888"
+fetch_backend = "jina"          # "jina" (r.jina.ai, no key, renders JS) or "trafilatura"
+jina_base = "https://r.jina.ai/"
+
+[lint]
+stale_days = 30
+contradiction_days = 14

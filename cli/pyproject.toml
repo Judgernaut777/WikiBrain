@@ -1,0 +1,28 @@
+[project]
+name = "wiki-brain-cli"
+version = "0.1.0"
+description = "Pure-code CLI for the wiki-brain LLM memory system (no model calls)"
+requires-python = ">=3.11"
+dependencies = [
+    "trafilatura>=1.6",
+]
+
+# Optional extras — each is import-guarded in code so the core CLI runs without
+# them. All are local + key-free (no billable LLM calls, no API keys), keeping
+# the project's "zero model calls in the CLI" boundary intact.
+[project.optional-dependencies]
+search = ["ddgs>=6"]                                            # robust DuckDuckGo (scrape fallback if absent)
+docs = ["docling>=2.0", "pytesseract>=0.3.10", "pillow>=10"]   # PDF/DOCX/OCR
+media = ["youtube-transcript-api>=0.6"]                         # video captions
+whisper = ["faster-whisper>=1.0"]                               # local ASR (needs ffmpeg)
+semantic = ["sentence-transformers>=3", "numpy>=1.26"]          # local embeddings
+
+[project.scripts]
+wiki = "wiki.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["wiki"]

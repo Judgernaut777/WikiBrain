@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  acceptance:
+    name: acceptance (${{ matrix.os }} / py${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.experimental }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ["3.11", "3.12"]
+        experimental: [false]
+        include:
+          # Python 3.14 is the dev environment; allowed to fail while wheels settle.
+          - os: windows-latest
+            python: "3.14"
+            experimental: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install core CLI (no optional extras)
+        run: pip install ./cli
+      - name: Run acceptance suite
+        # Pure Python, offline, temp DB. Also enforces: no API keys / no machine
+        # paths in tracked files (the project's key-free guarantee).
+        run: python tests/acceptance.py

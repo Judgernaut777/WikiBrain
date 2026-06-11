@@ -1,0 +1,35 @@
+# Machine-specific config (absolute paths, local folders). Ship config.example.toml
+# instead; users copy it to config.toml. Keeps personal paths out of the repo.
+config.toml
+
+# Local operations log — runtime state (mutating commands append the resolved DB
+# path here). Like the live DB, it's machine-local, not shared source.
+log.md
+
+# Personal knowledge content — LOCAL ONLY, never published. This is a code/design
+# repo; the brain's actual content stays on your machine. The live DB (the source
+# of truth) is already outside the tree; raw/inbox are captured material and wiki/
+# + db/dump.sql are regenerable projections. Leading "/" anchors to the repo root
+# so the cli/wiki/ PACKAGE SOURCE is NOT affected.
+/raw/
+/inbox/
+/wiki/
+/db/dump.sql
+
+# The live SQLite DB lives OUTSIDE the tree (config.toml paths.db). Never commit
+# any stray DB/WAL files that land in the repo.
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.db.bak
+*.db.*.bak
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+build/
+dist/
