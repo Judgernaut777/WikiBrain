@@ -249,12 +249,20 @@ def _render_source(repo: Repo, page) -> tuple[str, str, str]:
         "updated": updated or '""',
     })
     out = [fm, "", f"# {src['title'] or f'Source #{sid}'}", ""]
-    out += ["| field | value |", "|---|---|",
+    info = ["| field | value |", "|---|---|",
             f"| origin | {src['origin']} |",
-            f"| status | {src['status']} |",
-            f"| url | {src['url'] or '—'} |",
-            f"| hash | `{src['hash'][:12]}` |",
-            f"| raw | [{src['path']}]({_rel_link(path, src['path'])}) |", ""]
+            f"| status | {src['status']} |"]
+    if src["mime_type"]:
+        info.append(f"| type | {src['mime_type']} |")
+    if src["category"]:
+        info.append(f"| category | {src['category']} |")
+    _tags = json.loads(src["tags"] or "[]")
+    if _tags:
+        info.append(f"| tags | {', '.join(_tags)} |")
+    info += [f"| url | {src['url'] or '—'} |",
+             f"| hash | `{src['hash'][:12]}` |",
+             f"| raw | [{src['path']}]({_rel_link(path, src['path'])}) |", ""]
+    out += info
     out += ["## Summary", ""]
     if summ:
         out += [summ["text"].rstrip(), ""]

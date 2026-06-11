@@ -245,6 +245,110 @@ def main():
         rendermod.render(r, all_pages=True)
     check("digest re-render is byte-identical", dgfile.read_bytes() == dgb1)
 
+    # ---------------- Image labels (category/tags) ----------------
+    print("[labels] category/tags from extraction JSON")
+    ltmp = Path(tempfile.mkdtemp(prefix="wikibrain-labels-"))
+    lroot = make_repo(ltmp)
+    write(lroot / "img.md", "placeholder describing an image source")
+    with Repo.open(start=lroot) as r:
+        lsid, _ = ingest.add(r, str(lroot / "img.md"), origin="drop", title="diagram")
+        lj = {"source_id": lsid, "summary": "An architecture diagram.",
+              "claims": [{"text": "The diagram shows a load balancer.",
+                          "confidence": 0.8, "entities": ["LoadBalancer"], "relations": []}],
+              "low_confidence": False,
+              "category": "diagram", "tags": ["architecture", "infra"]}
+        write(lroot / "lj.json", json.dumps(lj))
+        ingest.file_claims(r, lsid, str(lroot / "lj.json"))
+        srow = r.one("SELECT category, tags FROM sources WHERE id=?", (lsid,))
+    check("file-claims sets source category", srow["category"] == "diagram")
+    check("file-claims sets source tags (JSON array)",
+          json.loads(srow["tags"]) == ["architecture", "infra"])
+    bad = {"source_id": lsid, "summary": "x", "claims": [],
+           "low_confidence": False, "tags": "notalist"}
+    write(lroot / "badtags.json", json.dumps(bad))
+    rej = False
+    try:
+        with Repo.open(start=lroot) as r:
+            ingest.file_claims(r, lsid, str(lroot / "badtags.json"))
+    except ingest.IngestError:
+        rej = True
+    check("invalid tags (non-list) rejected", rej)
+
+    # ---------------- Extract dispatch + image drop ----------------
+    print("[extract] dispatch/guards + image asset handling")
+    from wiki import extract as extractmod
+    check("kind_for routes pdf->doc", extractmod.kind_for(Path("a.pdf")) == "doc")
+    check("kind_for routes png->image", extractmod.kind_for(Path("a.png")) == "image")
+    check("kind_for unknown->text", extractmod.kind_for(Path("a.zzz")) == "text")
+    _savedoc = sys.modules.get("docling.document_converter")
+    sys.modules["docling.document_converter"] = None  # force ImportError on docling
+    guarded = False
+    try:
+        extractmod.to_markdown(Path("x.pdf"), kind="doc")
+    except extractmod.ExtractError as e:
+        guarded = "[docs]" in str(e)
+    if _savedoc is not None:
+        sys.modules["docling.document_converter"] = _savedoc
+    else:
+        sys.modules.pop("docling.document_converter", None)
+    check("doc extraction guarded with [docs] install hint", guarded)
+
+    # image drop: monkeypatch the OCR backend so no tesseract binary is needed
+    itmp = Path(tempfile.mkdtemp(prefix="wikibrain-img-"))
+    iroot = make_repo(itmp)
+    idrop = itmp / "dz"
+    idrop.mkdir()
+    (idrop / "diagram.png").write_bytes(b"\x89PNG\r\n\x1a\n fake png bytes")
+    _oimg = extractmod._image
+    extractmod._image = lambda p, tesseract_cmd=None: \
+        "# image: diagram.png\n\nOCR text:\n\nLOAD BALANCER\n"
+    try:
+        with Repo.open(start=iroot) as r:
+            r.cfg.data["paths"]["drop_folder"] = str(idrop)
+            ires = dropmod.scan(r)
+    finally:
+        extractmod._image = _oimg
+    check("image drop registers an image/* source",
+          ires and ires[0]["source_id"] and (ires[0]["mime_type"] or "").startswith("image/"))
+    assets = list((iroot / "raw" / "assets").glob("diagram-*.png"))
+    check("image binary copied into raw/assets/", len(assets) == 1)
+    raw_md = list((iroot / "raw").glob("diagram-*.md"))
+    raw_txt = raw_md[0].read_text(encoding="utf-8") if raw_md else ""
+    check("image raw artifact links the asset + carries OCR text",
+          "raw/assets/" in raw_txt and "LOAD BALANCER" in raw_txt)
+
+    # ---------------- Transcribe ----------------
+    print("[transcribe] youtube captions -> source")
+    check("_yt_id parses watch?v=",
+          extractmod._yt_id("https://www.youtube.com/watch?v=abc123XYZ") == "abc123XYZ")
+    check("_yt_id parses youtu.be",
+          extractmod._yt_id("https://youtu.be/abc123XYZ") == "abc123XYZ")
+    ttmp = Path(tempfile.mkdtemp(prefix="wikibrain-tt-"))
+    troot = make_repo(ttmp)
+    _oyt = extractmod._youtube
+    extractmod._youtube = lambda url: (
+        f"# transcript: {url}\n\nhello world from the video.\n", "transcript abc")
+    try:
+        with Repo.open(start=troot) as r:
+            tsid = ingest.transcribe(r, "https://www.youtube.com/watch?v=abc123XYZ")
+            trow = r.one("SELECT origin, url FROM sources WHERE id=?", (tsid,))
+    finally:
+        extractmod._youtube = _oyt
+    check("transcribe registers origin=transcript", trow["origin"] == "transcript")
+    check("transcribe keeps the source url", "youtube.com" in (trow["url"] or ""))
+    _savedyt = sys.modules.get("youtube_transcript_api")
+    sys.modules["youtube_transcript_api"] = None  # force [media] absent
+    tguard = False
+    try:
+        extractmod.transcribe("https://www.youtube.com/watch?v=zzz")
+    except extractmod.ExtractError as e:
+        tguard = "[media]" in str(e)
+    if _savedyt is not None:
+        sys.modules["youtube_transcript_api"] = _savedyt
+    else:
+        sys.modules.pop("youtube_transcript_api", None)
+    check("transcribe guarded when [media] extra absent", tguard)
+
     # ---------------- Phase 1 ----------------
     print("[Phase 1] ingest / search / graph")
     write(rel("src1.md"), "Redis 7.2 is the session cache. Sidekiq uses Redis. Postgres is primary.")

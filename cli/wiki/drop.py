@@ -27,6 +27,8 @@ def scan(repo: Repo, *, move: bool = True) -> list[dict]:
     if not folder or not folder.exists():
         return results
     processed_dir = folder / PROCESSED
+    tess = repo.cfg.extract_cfg("tesseract_cmd") or None
+    assets = repo.root / "raw" / "assets"
 
     def _archive(path: Path, h8: str | None) -> None:
         if not move:
@@ -46,11 +48,20 @@ def scan(repo: Repo, *, move: bool = True) -> list[dict]:
         entry = {"file": path.name, "kind": kind, "mime_type": mime,
                  "source_id": None, "warning": None}
         try:
-            md = extract.to_markdown(path, kind=kind)
+            md = extract.to_markdown(path, kind=kind, tesseract_cmd=tess)
         except extract.ExtractError as e:
             entry["warning"] = str(e)  # extractor/extra missing -> leave in place
             results.append(entry)
             continue
+        # For images, keep the binary under raw/assets/ so a session can view it,
+        # and link it from the raw artifact.
+        if kind == "image":
+            assets.mkdir(parents=True, exist_ok=True)
+            ah8 = util.sha256_bytes(path.read_bytes())[:8]
+            asset = assets / f"{util.slug(path.stem)}-{ah8}{path.suffix.lower()}"
+            shutil.copyfile(path, asset)
+            md = (f"![{path.stem}]({asset.name})\n\n_image file: "
+                  f"`{repo.rel(asset)}` — view it to describe and label._\n\n" + md)
         content = md.encode("utf-8")
         h8 = util.sha256_bytes(content)[:8]
         dest = repo.root / "raw" / f"{util.slug(path.stem)}-{h8}.md"

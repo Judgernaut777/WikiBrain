@@ -51,8 +51,13 @@ Gate/review: `wiki gate` · `wiki promote <ids>` · `wiki reject <ids>` ·
  "claims": [{"text": "<=400 chars atomic assertion", "location": "opt hint",
              "confidence": 0.0, "entities": ["Name"],
              "relations": [{"src": "Name", "rel": "uses", "dst": "Name"}]}],
- "low_confidence": false, "proposed_questions": ["optional follow-ups"]}
+ "low_confidence": false, "proposed_questions": ["optional follow-ups"],
+ "category": "optional label (e.g. diagram|photo|chart|screenshot)",
+ "tags": ["optional", "routing", "labels"]}
 ```
+`category` + `tags` are optional and most useful for **images**: when the source
+is an image, view it, put a description in `summary`, visible entities in
+`claims[].entities`, and a `category` + `tags` so the DB can route/group it.
 **Granularity (hybrid):** atomic claims for trackable facts — numbers, dates,
 versions, "X works/doesn't work with Y", positions taken. Narrative and nuance
 go in `summary`. When in doubt, summary.

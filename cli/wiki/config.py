@@ -38,6 +38,12 @@ DEFAULTS = {
         "stale_days": 30,
         "contradiction_days": 14,
     },
+    "extract": {
+        "ocr": True,            # allow Tesseract OCR for images
+        "tesseract_cmd": "",    # explicit path to tesseract.exe (Windows), or "" for PATH
+        "docling_ocr": True,    # let Docling OCR scanned PDFs
+        "whisper_model": "base",  # local ASR model size (only if [whisper] extra)
+    },
 }
 
 
@@ -105,3 +111,6 @@ class Config:
 
     def lint_cfg(self, key: str):
         return self.data["lint"].get(key)
+
+    def extract_cfg(self, key: str):
+        return self.data["extract"].get(key)

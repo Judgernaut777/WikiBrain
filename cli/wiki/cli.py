@@ -11,7 +11,7 @@ from .config import Config
 from .db import Repo, init_db
 from . import (ingest, search as searchmod, queue as queuemod, render as rendermod,
                lint as lintmod, health as healthmod, gather, gate as gatemod,
-               review, fetch as fetchmod, drop as dropmod)
+               review, fetch as fetchmod, drop as dropmod, extract as extractmod)
 
 SCAFFOLD_DIRS = [
     "raw", "raw/assets", "inbox",
@@ -114,6 +114,17 @@ def cmd_drop(args):
         print(f"  + #{r['source_id']} [{r['kind']}] {r['file']}")
     for r in warned:
         print(f"  ! {r['file']}: {r['warning']}")
+
+
+def cmd_transcribe(args):
+    with Repo.open() as repo:
+        try:
+            sid = ingest.transcribe(
+                repo, args.target,
+                whisper_model=repo.cfg.extract_cfg("whisper_model") or "base")
+        except (ingest.IngestError, extractmod.ExtractError) as e:
+            sys.exit(f"error: {e}")
+    print(f"transcribed source #{sid} (origin transcript)")
 
 
 def cmd_dump(args):
@@ -396,6 +407,10 @@ def build_parser() -> argparse.ArgumentParser:
     sdr.add_argument("--no-move", action="store_true",
                      help="don't archive originals to .processed/")
     sdr.set_defaults(func=cmd_drop)
+
+    stt = sub.add_parser("transcribe")
+    stt.add_argument("target", help="YouTube URL or local audio/video file")
+    stt.set_defaults(func=cmd_transcribe)
 
     sf = sub.add_parser("file-claims")
     sf.add_argument("--source", type=int, required=True)

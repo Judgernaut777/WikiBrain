@@ -10,7 +10,7 @@ from pathlib import Path
 
 from .db import Repo
 from .entities import get_or_create_entity
-from . import fetch, util
+from . import fetch, util, extract
 
 
 class IngestError(Exception):
@@ -118,6 +118,24 @@ def capture(repo: Repo, origin_harness: str, text: str) -> int:
     return sid
 
 
+# --- transcribe -------------------------------------------------------------
+def transcribe(repo: Repo, target: str, *, whisper_model: str = "base") -> int:
+    """Ingest a video/audio transcript (YouTube captions or local Whisper) as a
+    pending source with origin 'transcript'."""
+    md, title = extract.transcribe(target, whisper_model=whisper_model)
+    content = md.encode("utf-8")
+    h8 = util.sha256_bytes(content)[:8]
+    dest = repo.root / "raw" / f"{util.slug(title or target)}-{h8}.md"
+    dest.write_text(md, encoding="utf-8")
+    url = target if fetch.is_url(target) else None
+    sid = _register_source(
+        repo, content=content, rel_path=repo.rel(dest), title=title, url=url,
+        origin="transcript", fetched_at=util.now_iso() if url else None,
+        mime_type="text/plain")
+    repo.finalize("transcribe", f"source #{sid} transcript: {target}")
+    return sid
+
+
 # --- file-claims ------------------------------------------------------------
 _MACHINE_ORIGINS = ("autoresearch",)
 
@@ -178,6 +196,12 @@ def _validate(data: dict, source_id: int) -> None:
     pq = data.get("proposed_questions", [])
     if not isinstance(pq, list) or not all(isinstance(q, str) for q in pq):
         fail("proposed_questions must be a list of strings")
+    cat = data.get("category")
+    if cat is not None and not isinstance(cat, str):
+        fail("category must be a string or omitted")
+    tags = data.get("tags", [])
+    if not isinstance(tags, list) or not all(isinstance(t, str) for t in tags):
+        fail("tags must be a list of strings")
 
 
 def _detect_contradictions(repo: Repo, new_claim_id: int, text: str) -> int:
@@ -271,6 +295,15 @@ def file_claims(repo: Repo, source_id: int, json_path: str) -> dict:
                     "INSERT OR IGNORE INTO claim_entities(claim_id, entity_id) VALUES (?,?)",
                     (cid, eid))
         contradictions += _detect_contradictions(repo, cid, c["text"])
+
+    # Optional session-assigned label (used to route images/files in the DB).
+    cat = data.get("category")
+    tags = data.get("tags")
+    if cat is not None or tags:
+        repo.ex(
+            "UPDATE sources SET category = COALESCE(?, category), "
+            "tags = COALESCE(?, tags) WHERE id = ?",
+            (cat, json.dumps(tags) if tags else None, source_id))
 
     repo.ex("UPDATE sources SET status = 'extracted' WHERE id = ?", (source_id,))
 
