@@ -43,6 +43,15 @@ MIGRATIONS: dict[int, list[str]] = {
         " claim_id INTEGER NOT NULL REFERENCES claims(id) ON DELETE CASCADE,"
         " PRIMARY KEY (skill_id, claim_id))",
     ],
+    5: [  # Phase 6.1: skill version history + rollback
+        "ALTER TABLE skills ADD COLUMN version INTEGER NOT NULL DEFAULT 0",
+        "CREATE TABLE skill_versions ("
+        " id INTEGER PRIMARY KEY,"
+        " skill_id INTEGER NOT NULL REFERENCES skills(id) ON DELETE CASCADE,"
+        " version INTEGER NOT NULL, description TEXT NOT NULL, body TEXT NOT NULL,"
+        " allowed_tools TEXT, input_hash TEXT, claim_ids TEXT NOT NULL DEFAULT '[]',"
+        " note TEXT, created_at TEXT NOT NULL, UNIQUE(skill_id, version))",
+    ],
 }
 
 

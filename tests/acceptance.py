@@ -86,6 +86,9 @@ def main():
     _tbls = {row[0] for row in c.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     check("migrate v3 creates embeddings table", "embeddings" in _tbls)
     check("migrate v4 creates skills tables", {"skills", "skill_claims"} <= _tbls)
+    check("migrate v5 creates skill_versions table", "skill_versions" in _tbls)
+    _skill_cols = {row[1] for row in c.execute("PRAGMA table_info(skills)")}
+    check("migrate v5 adds skills.version column", "version" in _skill_cols)
     check("existing row gets default tags='[]'",
           c.execute("SELECT tags FROM sources WHERE hash='h1'").fetchone()[0] == "[]")
     migratemod.migrate(c)  # idempotent re-run
@@ -688,6 +691,57 @@ def main():
         # archive now removes the generated repo dir
         skillsmod.archive(r, "test-skill")
         check("archive removes the generated repo dir", not sdir.exists())
+
+    # ---------------- Phase 6.1: versioning / rollback / audit / merge ----------
+    print("[Phase 6.1] skill versioning / rollback / audit / merge")
+    with Repo.open(start=root) as r:
+        pc = [row["id"] for row in r.q(
+            "SELECT id FROM claims WHERE status='promoted' ORDER BY id LIMIT 2")]
+        skillsmod.new(r, "ver-skill", "A versioned skill.", claims=pc)
+        skillsmod.set_body(r, "ver-skill", "# v1\nfirst body")
+        skillsmod.approve(r, "ver-skill")                       # -> v1
+        skillsmod.set_body(r, "ver-skill", "# v2\nsecond body, broken change")
+        path = skillsmod.approve(r, "ver-skill")                # -> v2
+        vs = skillsmod.versions(r, "ver-skill")
+        check("two approved versions recorded", [v["version"] for v in vs] == [1, 2])
+        check("current version flagged", [v["version"] for v in vs if v["current"]] == [2])
+        check("live body is v2 before rollback", "second body" in (root / path).read_text("utf-8"))
+
+        d = skillsmod.diff(r, "ver-skill", 1, None)
+        check("diff shows the changed lines", "first body" in d and "second body" in d)
+
+        res = skillsmod.revert(r, "ver-skill", to=1)            # rollback
+        body = (root / res["path"]).read_text("utf-8")
+        check("rollback restores v1 body", "first body" in body and "second body" not in body)
+        check("revert appended as a new version (append-only history)",
+              res["new_version"] == 3)
+        check("revert note records the source version", any(
+            v["note"] == "reverted to v1" for v in skillsmod.versions(r, "ver-skill")))
+
+        # redundancy detection + merge
+        _, warns = skillsmod.new(r, "ver-dup", "A versioned skill.", claims=pc)
+        check("author-time overlap warning fires", bool(warns))
+        aud = skillsmod.audit(r)
+        check("audit reports the redundant pair", any(
+            {p["a"], p["b"]} == {"ver-skill", "ver-dup"} for p in aud["redundant"]))
+        skillsmod.merge(r, "ver-dup", "ver-skill")
+        check("merge archives the redundant skill",
+              r.one("SELECT status FROM skills WHERE name='ver-dup'")["status"] == "archived")
+        check("no redundant pairs after merge",
+              not any({p["a"], p["b"]} == {"ver-skill", "ver-dup"}
+                      for p in skillsmod.audit(r)["redundant"]))
+        # merge refused while installed (guard)
+        skillsmod.new(r, "ver-keep", "Keep me.", claims=pc)
+        skillsmod.set_body(r, "ver-keep", "# keep")
+        skillsmod.approve(r, "ver-keep")
+        merge_blocked = False
+        try:
+            r.ex("UPDATE skills SET installed=1 WHERE name='ver-keep'")
+            skillsmod.merge(r, "ver-keep", "ver-skill")
+        except SystemExit:
+            merge_blocked = True
+        check("merge refused while source is installed", merge_blocked)
+        r.ex("UPDATE skills SET installed=0 WHERE name='ver-keep'"); r.conn.commit()
 
     print(f"\nRESULT: {PASS} passed, {FAIL} failed")
     sys.exit(1 if FAIL else 0)

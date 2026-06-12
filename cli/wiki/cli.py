@@ -441,8 +441,10 @@ def _dispatch_skill(repo, args):
                   f"[{r['kind']}: {r['entity']}]  e.g. "
                   + ", ".join(f"#{i}" for i in r['sample_claim_ids'][:5]))
     elif c == "new":
-        name = skillsmod.new(repo, args.name, args.description, _parse_ids(args.claims))
+        name, warns = skillsmod.new(repo, args.name, args.description, _parse_ids(args.claims))
         print(f"created draft skill {name!r}")
+        for w in warns:
+            print(f"  warning: {w}")
     elif c == "list":
         res = skillsmod.listing(repo, args.status)
         if _emit(res, args.json):
@@ -505,6 +507,46 @@ def _dispatch_skill(repo, args):
         print(f"{len(res)} skill(s) need review:")
         for r in res:
             print(f"  {r['skill']}: {'; '.join(r['reasons'])}")
+    elif c == "audit":
+        res = skillsmod.audit(repo)
+        if _emit(res, args.json):
+            return
+        d, rd = res["drift"], res["redundant"]
+        if not d and not rd:
+            print("skill audit: clean (no drift, no redundancy)")
+            return
+        if d:
+            print(f"drift ({len(d)}):")
+            for r in d:
+                print(f"  {r['skill']}: {'; '.join(r['reasons'])}")
+        if rd:
+            print(f"redundant pairs ({len(rd)}):")
+            for r in rd:
+                print(f"  {r['a']} <-> {r['b']} (claims {r['claim_overlap']}, "
+                      f"text {r['text_overlap']}) — consider `wiki skill merge`")
+    elif c == "merge":
+        skillsmod.merge(repo, skillsmod._norm_name(args.old), skillsmod._norm_name(args.into))
+        print(f"merged {args.old} into {args.into} (archived {args.old}); "
+              f"re-audit {args.into} for drift")
+    elif c == "versions":
+        res = skillsmod.versions(repo, skillsmod._norm_name(args.name))
+        if _emit(res, args.json):
+            return
+        if not res:
+            print("no versions yet (approve the skill to record v1)")
+            return
+        for r in res:
+            mark = " <- current" if r["current"] else ""
+            print(f"  v{r['version']}  {r['created_at']}  {r['chars']}ch  "
+                  f"[{r['note']}]{mark}")
+    elif c == "diff":
+        out = skillsmod.diff(repo, skillsmod._norm_name(args.name), args.frm, args.to)
+        print(out or "(no differences)")
+    elif c == "revert":
+        res = skillsmod.revert(repo, skillsmod._norm_name(args.name), args.to)
+        print(f"reverted {args.name} to v{res['restored_from']} "
+              f"(recorded as v{res['new_version']}); rendered {res['path']}"
+              + ("; re-installed globally" if res["reinstalled"] else ""))
     elif c == "render":
         rep = skillsmod.render(repo)
         if _emit(rep, args.json):
@@ -658,6 +700,18 @@ def build_parser() -> argparse.ArgumentParser:
     kar = ksub.add_parser("archive"); kar.add_argument("name")
     kli = ksub.add_parser("lint"); kli.add_argument("name", nargs="?"); addj(kli)
     kc = ksub.add_parser("check", help="drift report for approved skills"); addj(kc)
+    kau = ksub.add_parser("audit", help="drift + cross-skill redundancy report"); addj(kau)
+    km = ksub.add_parser("merge", help="move <old>'s claims into <into>, archive <old>")
+    km.add_argument("old"); km.add_argument("--into", required=True)
+    kv = ksub.add_parser("versions", help="version history of a skill")
+    kv.add_argument("name"); addj(kv)
+    kdf = ksub.add_parser("diff", help="diff skill bodies between versions")
+    kdf.add_argument("name")
+    kdf.add_argument("--from", dest="frm", type=int, help="version (default: previous)")
+    kdf.add_argument("--to", type=int, help="version (default: current live body)")
+    krv = ksub.add_parser("revert", help="restore a prior version (rollback)")
+    krv.add_argument("name")
+    krv.add_argument("--to", type=int, help="version to restore (default: previous)")
     kr = ksub.add_parser("render", help="project approved skills to .claude/skills"); addj(kr)
     ki = ksub.add_parser("install", help="opt-in copy to ~/.claude/skills (human)")
     ki.add_argument("name")

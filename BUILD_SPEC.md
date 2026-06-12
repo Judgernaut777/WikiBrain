@@ -527,6 +527,23 @@ whose recomputed hash diverged — the *refresh* signal, surfaced in the maintai
 dense promoted-claim cluster and no owning skill). It only surfaces candidates;
 the session decides which deserve a skill, and most do not.
 
+**Versioning & rollback (Phase 6.1).** Because the brain *changes* skills, a bad
+edit needs a way back. `skill_versions` is an append-only history: every `approve`
+and `revert` snapshots the full state (body, description, claim set, hash) as the
+next per-skill version. `wiki skill versions`/`diff`/`revert` inspect and roll
+back; revert is itself recorded as a new version, so the history never forks — you
+can always go either direction. If the skill was globally installed, revert
+re-pushes the restored copy. The DB body is the truth; git versions the rendered
+files as a secondary backstop.
+
+**Reconciliation (Phase 6.1).** Authoring without reconciliation accumulates
+near-duplicates. `wiki skill audit` reports per-skill drift **and** cross-skill
+redundant pairs — overlap scored by Jaccard over linked-claim sets and over
+description+body text (≥ 0.5), reusing the same primitives as the contradiction
+detector. `wiki skill new` warns at author time on overlap; `wiki skill merge
+<old> --into <new>` folds one into another and archives the loser. Like approval,
+merge/revert are **human-gated** — the unattended pass only audits and surfaces.
+
 **Determinism & containment.** A generated SKILL.md is byte-deterministic given DB
 state (no wall-clock in the body). The renderer writes only dirs it owns — each
 carries a `.generated` marker that gates deletion/uninstall — and refuses the

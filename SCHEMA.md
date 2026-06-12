@@ -84,16 +84,23 @@ claim. Machine-origin claims (`autoresearch`, `session/*`) are capped at
 - `gather_events(day, kind, qid, created_at)` — budget ledger for Phase 4.
   `kind` ∈ {`query`, `fetch`}. Lets the CLI enforce per-question / per-night
   budgets across separate process invocations. `day` is the local night bucket.
-- `skills(name, description, body, allowed_tools, status, input_hash, installed, …)`
-  + `skill_claims(skill_id, claim_id)` — Phase 6 skill authoring (BUILD_SPEC §12).
+- `skills(name, description, body, allowed_tools, status, input_hash, installed,
+  version, …)` + `skill_claims(skill_id, claim_id)` + `skill_versions(skill_id,
+  version, body, …)` — Phase 6 skill authoring (BUILD_SPEC §12).
   `body` is the only free-prose field (the SKILL.md content, the skills analog of
   `pages.synthesis`). `input_hash` = sha256 of the sorted `promoted` linked claim
   ids + their review timestamps (the drift basis, analog of
   `synthesis_input_hash`); recomputed ≠ stored ⇒ the skill **drifted** and
-  `wiki skill check` flags it. `skill_claims` records provenance (promoted-only)
-  and feeds the hash. `name` is a kebab-case slug = the `.claude/skills/` dir name;
-  `wiki-maintainer` is reserved. Generated dirs carry a `.generated` marker so the
-  renderer only ever deletes dirs it owns.
+  `wiki skill check`/`audit` flags it. `skill_claims` records provenance
+  (promoted-only) and feeds the hash. `name` is a kebab-case slug = the
+  `.claude/skills/` dir name; `wiki-maintainer` is reserved. Generated dirs carry a
+  `.generated` marker so the renderer only ever deletes dirs it owns.
+  **Versioning (Phase 6.1):** `skill_versions` is append-only — every `approve`/
+  `revert` snapshots full state as the next per-skill `version`; `skills.version`
+  is the current one. `wiki skill revert --to N` restores a snapshot (recorded as a
+  new version, so history never forks). **Redundancy:** `wiki skill audit` flags
+  skill pairs whose linked-claim sets or description+body text overlap (Jaccard ≥
+  0.5); `wiki skill merge` reconciles them (human-gated).
 
 ## CLI conventions
 Every mutating command commits, refreshes `db/dump.sql`, and appends a line to

@@ -22,6 +22,7 @@ never clobber a hand-authored skill.
 """
 from __future__ import annotations
 
+import difflib
 import json
 import re
 import shutil
@@ -29,6 +30,10 @@ from pathlib import Path
 
 from .db import Repo
 from . import util
+
+# Two skills count as redundant when either their linked-claim sets or their
+# description+body text overlap at least this much (Jaccard). Surfaced by audit.
+REDUNDANCY_THRESHOLD = 0.5
 
 # Names the brain may never generate/overwrite (hand-authored skills).
 RESERVED = {"wiki-maintainer"}
@@ -112,7 +117,10 @@ def suggest(repo: Repo, min_claims: int = 4) -> list[dict]:
 
 
 # --- create / author --------------------------------------------------------
-def new(repo: Repo, name: str, description: str, claims: list[int] | None = None) -> str:
+def new(repo: Repo, name: str, description: str,
+        claims: list[int] | None = None) -> tuple[str, list[str]]:
+    """Create a draft skill. Returns (name, warnings). A warning is emitted when
+    the new skill overlaps an existing one — a nudge toward merge over duplicate."""
     name = _norm_name(name)
     if repo.one("SELECT 1 FROM skills WHERE name = ?", (name,)):
         raise SkillError(f"error: skill {name!r} already exists")
@@ -121,8 +129,30 @@ def new(repo: Repo, name: str, description: str, claims: list[int] | None = None
     sid = repo.one("SELECT id FROM skills WHERE name = ?", (name,))["id"]
     if claims:
         _attach(repo, sid, claims)
+    warns = _overlap_warnings(repo, sid)
     repo.finalize("skill-new", f"{name} (draft)")
-    return name
+    return name, warns
+
+
+def _claim_set(repo: Repo, skill_id: int) -> set[int]:
+    return {r["claim_id"] for r in repo.q(
+        "SELECT claim_id FROM skill_claims WHERE skill_id = ?", (skill_id,))}
+
+
+def _overlap_warnings(repo: Repo, skill_id: int) -> list[str]:
+    row = repo.one("SELECT * FROM skills WHERE id = ?", (skill_id,))
+    mine_claims = _claim_set(repo, skill_id)
+    mine_text = (row["description"] or "") + " " + (row["body"] or "")
+    out = []
+    for other in repo.q(
+            "SELECT * FROM skills WHERE id != ? AND status != 'archived'", (skill_id,)):
+        oc = _claim_set(repo, other["id"])
+        jc = (len(mine_claims & oc) / len(mine_claims | oc)) if (mine_claims | oc) else 0.0
+        jt = util.jaccard(mine_text, (other["description"] or "") + " " + (other["body"] or ""))
+        if max(jc, jt) >= REDUNDANCY_THRESHOLD:
+            out.append(f"overlaps {other['name']!r} (claims {jc:.2f}, text {jt:.2f}) "
+                       f"— consider `wiki skill merge` instead of a duplicate")
+    return out
 
 
 def set_body(repo: Repo, name: str, body: str) -> None:
@@ -173,10 +203,89 @@ def detach(repo: Repo, name: str, claims: list[int]) -> None:
     repo.finalize("skill-detach", f"{name} -{len(claims)} claim(s)")
 
 
+# --- version history (Phase 6.1) --------------------------------------------
+def _snapshot(repo: Repo, skill_id: int, note: str) -> int:
+    """Append the skill's CURRENT state to skill_versions as the next version and
+    bump skills.version. Caller must have already written the state being snapped."""
+    row = repo.one("SELECT * FROM skills WHERE id = ?", (skill_id,))
+    nextv = (row["version"] or 0) + 1
+    cids = sorted(_claim_set(repo, skill_id))
+    repo.ex(
+        """INSERT INTO skill_versions(skill_id, version, description, body,
+               allowed_tools, input_hash, claim_ids, note, created_at)
+           VALUES (?,?,?,?,?,?,?,?,?)""",
+        (skill_id, nextv, row["description"], row["body"], row["allowed_tools"],
+         row["input_hash"], json.dumps(cids), note, util.now_iso()))
+    repo.ex("UPDATE skills SET version = ? WHERE id = ?", (nextv, skill_id))
+    return nextv
+
+
+def versions(repo: Repo, name: str) -> list[dict]:
+    row = _require(repo, name)
+    return [{"version": v["version"], "note": v["note"], "created_at": v["created_at"],
+             "chars": len(v["body"]), "current": v["version"] == row["version"]}
+            for v in repo.q(
+                "SELECT * FROM skill_versions WHERE skill_id = ? ORDER BY version",
+                (row["id"],))]
+
+
+def _version_row(repo: Repo, skill_id: int, version: int):
+    v = repo.one("SELECT * FROM skill_versions WHERE skill_id = ? AND version = ?",
+                 (skill_id, version))
+    if not v:
+        raise SkillError(f"error: no version {version}")
+    return v
+
+
+def diff(repo: Repo, name: str, frm: int | None, to: int | None) -> str:
+    """Unified diff of skill bodies. `to=None` means the current live body."""
+    row = _require(repo, name)
+    if frm is None:
+        frm = (row["version"] or 0) - 1
+        if frm < 1:
+            raise SkillError("error: no earlier version to diff against")
+    a = _version_row(repo, row["id"], frm)["body"]
+    b = (_version_row(repo, row["id"], to)["body"] if to is not None else row["body"])
+    blabel = f"v{to}" if to is not None else "current"
+    return "\n".join(difflib.unified_diff(
+        a.splitlines(), b.splitlines(),
+        fromfile=f"{name} v{frm}", tofile=f"{name} {blabel}", lineterm=""))
+
+
+def revert(repo: Repo, name: str, to: int | None = None) -> dict:
+    """Restore a prior version's content + claim links, re-approve, re-render, and
+    (if installed) re-push the global copy. The revert is itself recorded as a new
+    version, so history stays append-only and you can always go either direction."""
+    row = _require(repo, name)
+    if to is None:
+        to = (row["version"] or 0) - 1
+        if to < 1:
+            raise SkillError("error: no earlier version to revert to")
+    v = _version_row(repo, row["id"], to)
+    repo.ex("""UPDATE skills SET description=?, body=?, allowed_tools=?, input_hash=?,
+                   status='approved', reviewed_at=? WHERE id=?""",
+            (v["description"], v["body"], v["allowed_tools"], v["input_hash"],
+             util.now_iso(), row["id"]))
+    repo.ex("DELETE FROM skill_claims WHERE skill_id = ?", (row["id"],))
+    for cid in json.loads(v["claim_ids"] or "[]"):
+        if repo.one("SELECT 1 FROM claims WHERE id = ?", (cid,)):
+            repo.ex("INSERT OR IGNORE INTO skill_claims(skill_id, claim_id) VALUES (?,?)",
+                    (row["id"], cid))
+    newv = _snapshot(repo, row["id"], f"reverted to v{to}")
+    repo.finalize("skill-revert", f"{name} -> v{to} (now v{newv})")
+    path = render_one(repo, _require(repo, name))
+    reinstalled = False
+    if row["installed"]:
+        install(repo, name)
+        reinstalled = True
+    return {"restored_from": to, "new_version": newv, "path": path,
+            "reinstalled": reinstalled}
+
+
 # --- the gate ---------------------------------------------------------------
 def approve(repo: Repo, name: str) -> str:
-    """Promote a draft to approved and render it to disk. This is the gate:
-    given a skill's blast radius, reserve for the human / interactive `/maintain`."""
+    """Promote a draft to approved, snapshot a version, and render it to disk. This
+    is the gate: given a skill's blast radius, reserve for the human / `/maintain`."""
     row = _require(repo, name)
     findings = _validate(repo, row)
     blocking = [f for f in findings if f[0] == "error"]
@@ -185,7 +294,8 @@ def approve(repo: Repo, name: str) -> str:
                          + "; ".join(m for _, m in blocking))
     repo.ex("UPDATE skills SET status='approved', input_hash=?, reviewed_at=? WHERE id=?",
             (_input_hash(repo, row["id"]), util.now_iso(), row["id"]))
-    repo.finalize("skill-approve", name)
+    newv = _snapshot(repo, row["id"], "approved")
+    repo.finalize("skill-approve", f"{name} (v{newv})")
     path = render_one(repo, _require(repo, name))
     return path
 
@@ -252,6 +362,50 @@ def check(repo: Repo, *, status: str = "approved") -> list[dict]:
         if reasons:
             out.append({"skill": row["name"], "drift": True, "reasons": reasons})
     return out
+
+
+def redundant_pairs(repo: Repo) -> list[dict]:
+    """Non-archived skill pairs that overlap (shared claims OR similar text). The
+    cross-skill audit `wiki skill suggest`'s create-time dedup can't catch."""
+    sk = repo.q("SELECT * FROM skills WHERE status != 'archived' ORDER BY name")
+    out = []
+    for i in range(len(sk)):
+        for j in range(i + 1, len(sk)):
+            a, b = sk[i], sk[j]
+            ca, cb = _claim_set(repo, a["id"]), _claim_set(repo, b["id"])
+            jc = (len(ca & cb) / len(ca | cb)) if (ca | cb) else 0.0
+            jt = util.jaccard((a["description"] or "") + " " + (a["body"] or ""),
+                              (b["description"] or "") + " " + (b["body"] or ""))
+            if max(jc, jt) >= REDUNDANCY_THRESHOLD:
+                out.append({"a": a["name"], "b": b["name"],
+                            "claim_overlap": round(jc, 2), "text_overlap": round(jt, 2)})
+    return out
+
+
+def audit(repo: Repo) -> dict:
+    """The umbrella health check the maintain pass runs: per-skill drift PLUS
+    cross-skill redundancy. Read-only; reconciliation stays human-gated."""
+    return {"drift": check(repo), "redundant": redundant_pairs(repo)}
+
+
+def merge(repo: Repo, old: str, into: str) -> None:
+    """Reconcile a redundant pair: move `old`'s claim links into `into`, then
+    archive `old` (removing its generated dir). `into`'s basis changes, so it will
+    show drift at the next audit — a nudge to re-author + re-approve the union.
+    Human-run; refused while `old` is globally installed."""
+    o = _require(repo, old)
+    n = _require(repo, into)
+    if o["id"] == n["id"]:
+        raise SkillError("error: cannot merge a skill into itself")
+    if o["installed"]:
+        raise SkillError(f"error: {old!r} is installed globally; "
+                         f"run `wiki skill uninstall {old}` first")
+    for cid in _claim_set(repo, o["id"]):
+        repo.ex("INSERT OR IGNORE INTO skill_claims(skill_id, claim_id) VALUES (?,?)",
+                (n["id"], cid))
+    _remove_dir(_skill_dir(repo, old))
+    repo.ex("UPDATE skills SET status='archived' WHERE id = ?", (o["id"],))
+    repo.finalize("skill-merge", f"{old} -> {into}")
 
 
 # --- listing ----------------------------------------------------------------

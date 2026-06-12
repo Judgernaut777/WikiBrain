@@ -35,9 +35,10 @@ never a pass).
      or `wiki skill set <name> "<body>"`. Keep it a tight, self-contained procedure.
    - Leave it **draft**. List it in the commit "surface for the human" block:
      `wiki skill list --status draft`.
-3. `wiki skill check` — report approved skills that have **drifted** (a source
-   claim was superseded/rejected since approval). Surface these too; re-author the
-   body and leave the re-approval for the human.
+3. `wiki skill audit` — report approved skills that **drifted** (a source claim was
+   superseded/rejected since approval) **and redundant skill pairs** (overlapping
+   claims/text). Surface both; you may re-author a drifted body, but leave
+   re-approval and any `wiki skill merge` for the human.
 
 ## Interactive `/maintain` or human: the gate
 - Review drafts: `wiki skill get <name>`, `wiki skill lint <name>`.
@@ -49,9 +50,36 @@ never a pass).
   uninstall <name>` reverses it. Archiving is refused while installed.
 
 ## Refreshing a drifted skill
-`wiki skill check` flags it → re-read its promoted claims → rewrite with
-`wiki skill set` → `wiki skill approve` again (re-stamps the drift basis). If it
-was installed, re-run `wiki skill install` to push the refreshed copy.
+`wiki skill check` (or `wiki skill audit`) flags it → re-read its promoted claims
+→ rewrite with `wiki skill set` → `wiki skill approve` again (re-stamps the drift
+basis). If it was installed, re-run `wiki skill install` to push the refreshed copy.
+
+## Versioning & rollback
+Every `wiki skill approve` snapshots the skill's full state (body, description,
+claim set, hash) as a numbered **version** — the DB is the truth; git versions the
+rendered files as a backstop. If a change makes a skill worse, roll back:
+```
+wiki skill versions <name>            # history: vN, date, note, current marker
+wiki skill diff <name> [--from A] [--to B]   # default: previous vs current body
+wiki skill revert <name> [--to N]     # restore vN (default: previous); re-renders,
+                                      # and re-installs if it was globally installed
+```
+Revert is itself recorded as a new version, so history is append-only — you can
+always go back *and* forward.
+
+## Reconciliation (avoid redundancy)
+The brain authors skills, so without reconciliation you accumulate near-duplicates.
+The audit catches what create-time dedup can't:
+```
+wiki skill audit                      # per-skill DRIFT + cross-skill REDUNDANT pairs
+wiki skill merge <old> --into <new>   # move <old>'s claims into <new>, archive <old>
+```
+`wiki skill new` also warns at author time when the new skill overlaps an existing
+one (shared claims or similar text) — prefer `merge` over a duplicate. Redundancy
+overlap is scored by Jaccard over linked-claim sets and over description+body text
+(threshold 0.5). Merge/supersede is **human-run** — never an unattended action.
+After a merge, re-audit `<new>` (its claim basis grew → it will show drift) and
+re-approve to fold the union into the body.
 
 ## Command cheat-sheet
 ```
@@ -62,7 +90,11 @@ wiki skill describe <name> "<desc>" · wiki skill tools <name> "Read,Grep"
 wiki skill attach|detach <name> <ids>        # manage provenance claim links
 wiki skill list [--status draft|approved|archived] · wiki skill lint [<name>]
 wiki skill check                             # drift report (approved skills)
-wiki skill approve <name>                    # THE GATE — human; drafts→approved+render
+wiki skill audit                             # drift + cross-skill redundancy
+wiki skill merge <old> --into <new>          # reconcile a redundant pair (human)
+wiki skill versions <name> · wiki skill diff <name> [--from A --to B]
+wiki skill revert <name> [--to N]            # rollback to a prior version
+wiki skill approve <name>                    # THE GATE — human; drafts→approved+render+vN
 wiki skill render                            # project all approved skills to disk
 wiki skill install|uninstall <name>          # opt-in ~/.claude/skills copy (human)
 wiki skill archive <name>                    # retire + remove the generated dir

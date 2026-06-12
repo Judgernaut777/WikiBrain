@@ -46,7 +46,8 @@ Gate/review: `wiki gate` · `wiki promote <ids>` · `wiki reject <ids>` ·
 `wiki supersede <old> --by <new>` · `wiki contradiction list|propose|resolve` ·
 `wiki escalation list|close`
 Skills: `wiki skill suggest` · `wiki skill new|set|get|list|lint` ·
-`wiki skill check` (drift) · `wiki skill approve` (human gate) · `wiki skill install` (opt-in)
+`wiki skill audit` (drift+redundancy) · `wiki skill merge` · `wiki skill
+versions|diff|revert` (rollback) · `wiki skill approve` (human gate) · `wiki skill install`
 
 ## Extraction JSON contract (for `wiki file-claims`)
 ```json

@@ -167,6 +167,7 @@ CREATE TABLE skills (
   status TEXT NOT NULL DEFAULT 'draft',-- draft | approved | archived
   input_hash TEXT,                     -- sha256 of promoted source claims at approval
   installed INTEGER NOT NULL DEFAULT 0,-- 1 = copied to ~/.claude/skills (opt-in)
+  version INTEGER NOT NULL DEFAULT 0,  -- current approved version (0 = never approved)
   created_at TEXT NOT NULL,
   reviewed_at TEXT
 );
@@ -177,10 +178,28 @@ CREATE TABLE skill_claims (
   claim_id INTEGER NOT NULL REFERENCES claims(id) ON DELETE CASCADE,
   PRIMARY KEY (skill_id, claim_id)
 );
+
+-- Append-only version history (Phase 6.1): one row per approve/revert, so a bad
+-- change can always be rolled back. `claim_ids` is the JSON snapshot of the linked
+-- claim set at that version. The DB body is the truth; git versions the rendered
+-- files as a secondary backstop.
+CREATE TABLE skill_versions (
+  id INTEGER PRIMARY KEY,
+  skill_id INTEGER NOT NULL REFERENCES skills(id) ON DELETE CASCADE,
+  version INTEGER NOT NULL,            -- 1-based, per skill
+  description TEXT NOT NULL,
+  body TEXT NOT NULL,
+  allowed_tools TEXT,
+  input_hash TEXT,
+  claim_ids TEXT NOT NULL DEFAULT '[]',
+  note TEXT,                           -- 'approved' | 'reverted to vN' | ...
+  created_at TEXT NOT NULL,
+  UNIQUE(skill_id, version)
+);
 """
 
 ALL_DDL = CORE_DDL + EXT_DDL
 
 # User-version stamped on the DB. Keep in sync with migrate.latest_version()
 # (the migration runner carries existing DBs forward to this version).
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
