@@ -126,6 +126,12 @@ END;
 # --- Extension schema (not in §3.1; see SCHEMA.md) --------------------------
 # gather_events records budgeted Phase-4 actions so the CLI can enforce the
 # per-question / per-night budgets across separate process invocations.
+#
+# The skills tables (Phase 6) make Claude skills a *third* projection out of the
+# DB (after wiki pages): a skill's body is authored from PROMOTED claims only and
+# projected to .claude/skills/<name>/SKILL.md by `wiki skill render`. They mirror
+# the pages model — `body` is free prose like pages.synthesis, `input_hash` is the
+# drift basis like pages.synthesis_input_hash. See SCHEMA.md and BUILD_SPEC.md §12.
 EXT_DDL = """
 CREATE TABLE gather_events (
   id INTEGER PRIMARY KEY,
@@ -146,10 +152,35 @@ CREATE TABLE embeddings (
   vec BLOB NOT NULL,
   created_at TEXT NOT NULL
 );
+
+-- Phase 6: Claude skills authored from promoted claims (see BUILD_SPEC §8).
+-- `body` is the only free-prose field (the SKILL.md content, like pages.synthesis).
+-- status: draft -> approved -> archived. Only `approved` skills render to disk;
+-- `draft` skills live in the DB but never touch .claude/skills (the gate, mirroring
+-- "unattended work produces only pending items, never edited pages").
+CREATE TABLE skills (
+  id INTEGER PRIMARY KEY,
+  name TEXT UNIQUE NOT NULL,           -- kebab-case slug = directory name
+  description TEXT NOT NULL DEFAULT '',-- one-line skill activation description
+  body TEXT NOT NULL DEFAULT '',       -- SKILL.md body prose (authored in-session)
+  allowed_tools TEXT,                  -- optional JSON array; NULL = inherit all
+  status TEXT NOT NULL DEFAULT 'draft',-- draft | approved | archived
+  input_hash TEXT,                     -- sha256 of promoted source claims at approval
+  installed INTEGER NOT NULL DEFAULT 0,-- 1 = copied to ~/.claude/skills (opt-in)
+  created_at TEXT NOT NULL,
+  reviewed_at TEXT
+);
+
+-- Provenance + drift basis: the PROMOTED claims a skill was derived from.
+CREATE TABLE skill_claims (
+  skill_id INTEGER NOT NULL REFERENCES skills(id) ON DELETE CASCADE,
+  claim_id INTEGER NOT NULL REFERENCES claims(id) ON DELETE CASCADE,
+  PRIMARY KEY (skill_id, claim_id)
+);
 """
 
 ALL_DDL = CORE_DDL + EXT_DDL
 
 # User-version stamped on the DB. Keep in sync with migrate.latest_version()
 # (the migration runner carries existing DBs forward to this version).
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4

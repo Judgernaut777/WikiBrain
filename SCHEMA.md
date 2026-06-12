@@ -27,6 +27,9 @@ Stored on `sources.origin` and copied onto `claims.origin` at extraction time.
 - `contradictions.status`: `open` → `resolved` (with `resolution`).
 - `research_queue.status`: `open` → (`done` | `parked`). Parked after 3 attempts.
 - `escalations.status`: `open` → `closed`.
+- `skills.status`: `draft` → `promoted`-equivalent `approved` → `archived`. Only
+  `approved` skills render to `.claude/skills/`; `draft` skills live in the DB but
+  never touch disk (the gate). `approve` is human-only (skills are instructions).
 
 ## Entity `kind`
 `person | org | tool | concept | event | place`. Extraction JSON carries no
@@ -81,6 +84,16 @@ claim. Machine-origin claims (`autoresearch`, `session/*`) are capped at
 - `gather_events(day, kind, qid, created_at)` — budget ledger for Phase 4.
   `kind` ∈ {`query`, `fetch`}. Lets the CLI enforce per-question / per-night
   budgets across separate process invocations. `day` is the local night bucket.
+- `skills(name, description, body, allowed_tools, status, input_hash, installed, …)`
+  + `skill_claims(skill_id, claim_id)` — Phase 6 skill authoring (BUILD_SPEC §12).
+  `body` is the only free-prose field (the SKILL.md content, the skills analog of
+  `pages.synthesis`). `input_hash` = sha256 of the sorted `promoted` linked claim
+  ids + their review timestamps (the drift basis, analog of
+  `synthesis_input_hash`); recomputed ≠ stored ⇒ the skill **drifted** and
+  `wiki skill check` flags it. `skill_claims` records provenance (promoted-only)
+  and feeds the hash. `name` is a kebab-case slug = the `.claude/skills/` dir name;
+  `wiki-maintainer` is reserved. Generated dirs carry a `.generated` marker so the
+  renderer only ever deletes dirs it owns.
 
 ## CLI conventions
 Every mutating command commits, refreshes `db/dump.sql`, and appends a line to

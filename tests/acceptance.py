@@ -23,7 +23,8 @@ from wiki.db import Repo, init_db          # noqa: E402
 from wiki import (ingest, search as searchmod, queue as queuemod,            # noqa: E402
                   render as rendermod, lint as lintmod, health as healthmod,
                   review, gate as gatemod, gather, fetch as fetchmod,
-                  migrate as migratemod, schema as schemamod, drop as dropmod)
+                  migrate as migratemod, schema as schemamod, drop as dropmod,
+                  skills as skillsmod)
 
 PASS, FAIL = 0, 0
 
@@ -84,6 +85,7 @@ def main():
     check("migrate bumps user_version to latest", ver == migratemod.latest_version())
     _tbls = {row[0] for row in c.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     check("migrate v3 creates embeddings table", "embeddings" in _tbls)
+    check("migrate v4 creates skills tables", {"skills", "skill_claims"} <= _tbls)
     check("existing row gets default tags='[]'",
           c.execute("SELECT tags FROM sources WHERE hash='h1'").fetchone()[0] == "[]")
     migratemod.migrate(c)  # idempotent re-run
@@ -609,6 +611,83 @@ def main():
         except gather.BudgetError:
             over = True
     check("per-night fetch budget enforced", over)
+
+    # ---------------- Phase 6: skills from promoted claims ----------------
+    print("[Phase 6] skill authoring / gate / drift / render / install")
+    import os as _os
+    with Repo.open(start=root) as r:
+        pc = [row["id"] for row in r.q(
+            "SELECT id FROM claims WHERE status='promoted' ORDER BY id LIMIT 2")]
+        check("have promoted claims to derive a skill from", len(pc) >= 1)
+
+        # draft skills never render to disk (the gate)
+        skillsmod.new(r, "test-skill", "A test skill from promoted claims.", claims=pc)
+        skillsmod.set_body(r, "test-skill", "# Test\n\nDo the thing.")
+        sdir = root / ".claude" / "skills" / "test-skill"
+        check("draft skill is NOT on disk", not (sdir / "SKILL.md").exists())
+        check("draft listed as draft", any(
+            s["name"] == "test-skill" and s["status"] == "draft" for s in skillsmod.listing(r)))
+
+        # reserved-name guard
+        reserved_blocked = False
+        try:
+            skillsmod.new(r, "wiki-maintainer", "x")
+        except SystemExit:
+            reserved_blocked = True
+        check("reserved name wiki-maintainer refused", reserved_blocked)
+
+        # approve = the gate -> renders to disk
+        path = skillsmod.approve(r, "test-skill")
+        check("approved skill rendered to .claude/skills", (root / path).exists())
+        body1 = (root / path).read_text(encoding="utf-8")
+        check("rendered SKILL.md has frontmatter name", "name: test-skill" in body1)
+        check("provenance footer lists claim ids",
+              all(f"#{c}" in body1 for c in pc))
+
+        # determinism: re-render is byte-identical
+        skillsmod.render(r)
+        check("skill re-render is byte-identical",
+              (root / path).read_text(encoding="utf-8") == body1)
+
+        # no drift right after approval; drift appears when a source claim drops
+        check("no drift immediately after approval", not skillsmod.check(r))
+        review.reject(r, [pc[0]])
+        drift = skillsmod.check(r)
+        check("drift flagged after a source claim is rejected",
+              any(d["skill"] == "test-skill" for d in drift))
+
+        # opt-in global install (redirect HOME to a temp dir so we never touch the
+        # real ~/.claude during tests)
+        fake_home = Path(tempfile.mkdtemp(prefix="wikibrain-home-"))
+        old_home = {k: _os.environ.get(k) for k in ("USERPROFILE", "HOME")}
+        _os.environ["USERPROFILE"] = str(fake_home)
+        _os.environ["HOME"] = str(fake_home)
+        try:
+            dst = skillsmod.install(r, "test-skill")
+            check("install copies skill into ~/.claude/skills",
+                  (fake_home / ".claude" / "skills" / "test-skill" / "SKILL.md").exists())
+            check("installed flag set", any(
+                s["name"] == "test-skill" and s["installed"] for s in skillsmod.listing(r)))
+            # archive is refused while installed
+            arch_blocked = False
+            try:
+                skillsmod.archive(r, "test-skill")
+            except SystemExit:
+                arch_blocked = True
+            check("archive refused while globally installed", arch_blocked)
+            skillsmod.uninstall(r, "test-skill")
+            check("uninstall removes the global copy",
+                  not (Path(dst)).exists())
+        finally:
+            for k, v in old_home.items():
+                if v is None:
+                    _os.environ.pop(k, None)
+                else:
+                    _os.environ[k] = v
+
+        # archive now removes the generated repo dir
+        skillsmod.archive(r, "test-skill")
+        check("archive removes the generated repo dir", not sdir.exists())
 
     print(f"\nRESULT: {PASS} passed, {FAIL} failed")
     sys.exit(1 if FAIL else 0)

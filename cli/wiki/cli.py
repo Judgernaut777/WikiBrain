@@ -12,7 +12,7 @@ from .db import Repo, init_db
 from . import (ingest, search as searchmod, queue as queuemod, render as rendermod,
                lint as lintmod, health as healthmod, gather, gate as gatemod,
                review, fetch as fetchmod, drop as dropmod, extract as extractmod,
-               embed as embedmod)
+               embed as embedmod, skills as skillsmod)
 
 SCAFFOLD_DIRS = [
     "raw", "raw/assets", "inbox",
@@ -409,6 +409,119 @@ def cmd_escalation(args):
             print(f"e#{args.id} closed")
 
 
+# --- skills -----------------------------------------------------------------
+def _parse_ids(s: str | None) -> list[int]:
+    if not s:
+        return []
+    return [int(x) for x in s.replace(",", " ").split()]
+
+
+def cmd_skill(args):
+    with Repo.open() as repo:
+        try:
+            _dispatch_skill(repo, args)
+        except skillsmod.SkillError:
+            raise
+        except ValueError as e:
+            sys.exit(f"error: {e}")
+
+
+def _dispatch_skill(repo, args):
+    c = args.skcmd
+    if c == "suggest":
+        res = skillsmod.suggest(repo, min_claims=args.min_claims)
+        if _emit(res, args.json):
+            return
+        if not res:
+            print("no skill candidates (need a denser claim cluster)")
+            return
+        print(f"{len(res)} candidate(s):")
+        for r in res:
+            print(f"  {r['slug']:<28} {r['promoted_claims']} promoted claim(s) "
+                  f"[{r['kind']}: {r['entity']}]  e.g. "
+                  + ", ".join(f"#{i}" for i in r['sample_claim_ids'][:5]))
+    elif c == "new":
+        name = skillsmod.new(repo, args.name, args.description, _parse_ids(args.claims))
+        print(f"created draft skill {name!r}")
+    elif c == "list":
+        res = skillsmod.listing(repo, args.status)
+        if _emit(res, args.json):
+            return
+        if not res:
+            print("no skills")
+            return
+        for r in res:
+            flags = []
+            if r["installed"]:
+                flags.append("installed")
+            if r["drift"]:
+                flags.append("DRIFT")
+            tail = f"  ({', '.join(flags)})" if flags else ""
+            print(f"  {r['name']:<28} [{r['status']}] {r['claims']} claim(s){tail}")
+            print(f"      {r['description']}")
+    elif c == "get":
+        print(skillsmod.get_body(repo, skillsmod._norm_name(args.name)))
+    elif c == "set":
+        body = args.text
+        if body == "-" or body is None:
+            body = sys.stdin.read()
+        skillsmod.set_body(repo, skillsmod._norm_name(args.name), body)
+        print(f"body set for {args.name}")
+    elif c == "describe":
+        skillsmod.describe(repo, skillsmod._norm_name(args.name), args.description)
+        print(f"description set for {args.name}")
+    elif c == "tools":
+        allowed = [t.strip() for t in (args.allowed or "").split(",") if t.strip()] or None
+        skillsmod.tools(repo, skillsmod._norm_name(args.name), allowed)
+        print(f"allowed-tools set for {args.name}")
+    elif c == "attach":
+        skillsmod.attach(repo, skillsmod._norm_name(args.name), _parse_ids(args.claims))
+        print(f"attached claim(s) to {args.name}")
+    elif c == "detach":
+        skillsmod.detach(repo, skillsmod._norm_name(args.name), _parse_ids(args.claims))
+        print(f"detached claim(s) from {args.name}")
+    elif c == "approve":
+        path = skillsmod.approve(repo, skillsmod._norm_name(args.name))
+        print(f"approved {args.name}; rendered {path}")
+    elif c == "archive":
+        skillsmod.archive(repo, skillsmod._norm_name(args.name))
+        print(f"archived {args.name}")
+    elif c == "lint":
+        res = skillsmod.lint(repo, skillsmod._norm_name(args.name) if args.name else None)
+        if _emit(res, args.json):
+            return
+        if not res:
+            print("skill lint: clean")
+            return
+        for r in res:
+            print(f"  [{r['severity']}] {r['skill']}: {r['message']}")
+    elif c == "check":
+        res = skillsmod.check(repo)
+        if _emit(res, args.json):
+            return
+        if not res:
+            print("skill check: no drift")
+            return
+        print(f"{len(res)} skill(s) need review:")
+        for r in res:
+            print(f"  {r['skill']}: {'; '.join(r['reasons'])}")
+    elif c == "render":
+        rep = skillsmod.render(repo)
+        if _emit(rep, args.json):
+            return
+        print(f"skill render: {len(rep['written'])} written, {len(rep['removed'])} removed")
+        for p in rep["written"]:
+            print(f"  + {p}")
+        for p in rep["removed"]:
+            print(f"  - {p}")
+    elif c == "install":
+        dst = skillsmod.install(repo, skillsmod._norm_name(args.name))
+        print(f"installed {args.name} -> {dst}")
+    elif c == "uninstall":
+        dst = skillsmod.uninstall(repo, skillsmod._norm_name(args.name))
+        print(f"uninstalled {args.name} (removed {dst})")
+
+
 # --- parser -----------------------------------------------------------------
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="wiki", description="wiki-brain CLI (no model calls)")
@@ -522,6 +635,34 @@ def build_parser() -> argparse.ArgumentParser:
     el = esub.add_parser("list"); el.add_argument("--status", default="open"); addj(el)
     ec = esub.add_parser("close"); ec.add_argument("id", type=int)
     se.set_defaults(func=cmd_escalation)
+
+    # skills: author Claude skills from promoted claims (Phase 6)
+    sk = sub.add_parser("skill", help="author/approve/install skills from promoted claims")
+    ksub = sk.add_subparsers(dest="skcmd", required=True)
+    ks = ksub.add_parser("suggest", help="surface skill candidates (read-only)")
+    ks.add_argument("--min-claims", type=int, default=4); addj(ks)
+    kn = ksub.add_parser("new"); kn.add_argument("name")
+    kn.add_argument("--description", required=True)
+    kn.add_argument("--claims", help="comma/space-separated promoted claim ids")
+    kl = ksub.add_parser("list"); kl.add_argument("--status"); addj(kl)
+    kg = ksub.add_parser("get"); kg.add_argument("name")
+    kt = ksub.add_parser("set"); kt.add_argument("name")
+    kt.add_argument("text", nargs="?", default="-", help="body text, or - for stdin")
+    kd = ksub.add_parser("describe"); kd.add_argument("name"); kd.add_argument("description")
+    ktl = ksub.add_parser("tools"); ktl.add_argument("name")
+    ktl.add_argument("allowed", nargs="?", help="comma-separated tool names ('' to clear)")
+    ka = ksub.add_parser("attach"); ka.add_argument("name"); ka.add_argument("claims")
+    kx = ksub.add_parser("detach"); kx.add_argument("name"); kx.add_argument("claims")
+    kap = ksub.add_parser("approve", help="THE GATE: promote a draft + render (human)")
+    kap.add_argument("name")
+    kar = ksub.add_parser("archive"); kar.add_argument("name")
+    kli = ksub.add_parser("lint"); kli.add_argument("name", nargs="?"); addj(kli)
+    kc = ksub.add_parser("check", help="drift report for approved skills"); addj(kc)
+    kr = ksub.add_parser("render", help="project approved skills to .claude/skills"); addj(kr)
+    ki = ksub.add_parser("install", help="opt-in copy to ~/.claude/skills (human)")
+    ki.add_argument("name")
+    ku = ksub.add_parser("uninstall"); ku.add_argument("name")
+    sk.set_defaults(func=cmd_skill)
 
     return p
 

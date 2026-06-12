@@ -31,6 +31,18 @@ MIGRATIONS: dict[int, list[str]] = {
         " model TEXT NOT NULL, dim INTEGER NOT NULL, vec BLOB NOT NULL,"
         " created_at TEXT NOT NULL)",
     ],
+    4: [  # Phase 6: skills authored from promoted claims (see BUILD_SPEC §8)
+        "CREATE TABLE skills ("
+        " id INTEGER PRIMARY KEY, name TEXT UNIQUE NOT NULL,"
+        " description TEXT NOT NULL DEFAULT '', body TEXT NOT NULL DEFAULT '',"
+        " allowed_tools TEXT, status TEXT NOT NULL DEFAULT 'draft',"
+        " input_hash TEXT, installed INTEGER NOT NULL DEFAULT 0,"
+        " created_at TEXT NOT NULL, reviewed_at TEXT)",
+        "CREATE TABLE skill_claims ("
+        " skill_id INTEGER NOT NULL REFERENCES skills(id) ON DELETE CASCADE,"
+        " claim_id INTEGER NOT NULL REFERENCES claims(id) ON DELETE CASCADE,"
+        " PRIMARY KEY (skill_id, claim_id))",
+    ],
 }
 
 

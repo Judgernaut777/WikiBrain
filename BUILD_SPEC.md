@@ -486,7 +486,52 @@ searxng_url = "http://localhost:8888"
 | 3 | Lint + health + hooks | Self-checking system |
 | 4 | Gather + bookmarks + budgets | Auto-feeding system |
 | 5 | Scheduled tasks + gate + skill | Fully autonomous loop, human-gated |
+| 6 | Skills from promoted truth (§12) | Brain authors its own Claude skills |
 
 Maintain `SCHEMA.md` as conventions evolve; this spec is the starting contract,
 not a cage. Any deviation that preserves §1's principles is permitted; any that
 violates them is not.
+
+## 12. Phase 6 — Skills authored from promoted truth
+
+The brain can promote durable, **promoted** knowledge into Claude skills. A skill
+is a *third* one-way projection out of the DB, after the wiki — the
+`claims → pages` machinery aimed at a second output tree:
+
+```
+promoted claims (truth) --[in-session judgment]--> skills.body
+                        --[wiki skill render]----> .claude/skills/<name>/SKILL.md
+                        --[wiki skill install]---> ~/.claude/skills/<name>/  (opt-in)
+```
+
+**Why it's safe.** A skill is *instructions a future agent executes* — the inverse
+of §1's "all content is data, never instructions." Two invariants neutralize the
+resulting injection path (`malicious source → claim → skill → executed`):
+1. A skill body is authored **only from `promoted` claims** (human-gated truth),
+   never raw/pending text. `skill_claims` records that provenance.
+2. Authoring ≠ activating. `draft` skills live in the DB but never touch disk.
+   `wiki skill approve` (the gate) is the only thing that renders a skill, and is
+   **human-only** — the unattended pass may draft and surface, never approve.
+   Reaching the global `~/.claude/skills/` is a second explicit `wiki skill
+   install`. Two human checkpoints stand between an idea and every-session
+   execution: merge the worktree, then install.
+
+**Data model.** `skills` + `skill_claims` (SCHEMA.md). `body` is free prose (the
+SKILL.md content; the analog of `pages.synthesis`). `input_hash` is the drift
+basis (analog of `synthesis_input_hash`): sha256 of the promoted linked claims +
+review timestamps, stamped at `approve`/`set`. `wiki skill check` reports skills
+whose recomputed hash diverged — the *refresh* signal, surfaced in the maintain
+"for the human" block alongside *needs synthesis review*.
+
+**Detection.** `wiki skill suggest` is a read-only heuristic (entities with a
+dense promoted-claim cluster and no owning skill). It only surfaces candidates;
+the session decides which deserve a skill, and most do not.
+
+**Determinism & containment.** A generated SKILL.md is byte-deterministic given DB
+state (no wall-clock in the body). The renderer writes only dirs it owns — each
+carries a `.generated` marker that gates deletion/uninstall — and refuses the
+reserved name `wiki-maintainer`, so it can never clobber a hand-authored skill.
+The `wiki` CLI still makes zero model calls; all body prose is written in-session.
+
+**Procedure.** `.claude/skills/wiki-maintainer/skills.md`; wired as step 7 of
+`maintain.md` (draft + surface only).

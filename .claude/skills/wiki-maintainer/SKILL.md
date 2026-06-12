@@ -45,6 +45,8 @@ Gather: `wiki bookmarks sync` · `wiki websearch "<q>" [--for <qid>]` · `wiki f
 Gate/review: `wiki gate` · `wiki promote <ids>` · `wiki reject <ids>` ·
 `wiki supersede <old> --by <new>` · `wiki contradiction list|propose|resolve` ·
 `wiki escalation list|close`
+Skills: `wiki skill suggest` · `wiki skill new|set|get|list|lint` ·
+`wiki skill check` (drift) · `wiki skill approve` (human gate) · `wiki skill install` (opt-in)
 
 ## Extraction JSON contract (for `wiki file-claims`)
 ```json
@@ -68,5 +70,7 @@ go in `summary`. When in doubt, summary.
 - **Morning maintain / `/maintain`:** [maintain.md](maintain.md) — the gate, Sonnet.
 - **Live capture:** [capture.md](capture.md) — when to call `wiki capture`.
 - **Answering questions:** [query.md](query.md) — search-first, cite ids.
+- **Authoring skills:** [skills.md](skills.md) — promote durable truth into a
+  Claude skill. Promoted-claims-only; `wiki skill approve` is a human gate.
 
 See `SCHEMA.md` for vocabularies, state machines, and the heuristics code applies.
