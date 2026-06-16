@@ -25,6 +25,9 @@ log.md
 *.db.bak
 *.db.*.bak
 
+# Scheduled-task transcripts (machine-local runtime logs, like log.md)
+/logs/
+
 # Python
 __pycache__/
 *.pyc
