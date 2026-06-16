@@ -71,25 +71,33 @@ def tool_search(repo: Repo, terms: str, promoted_only: bool = True,
     }
 
 
-def tool_hybrid(repo: Repo, query: str, k: int = 10) -> dict:
-    """Reciprocal-rank-fusion of FTS + local-embedding semantic search. Falls
-    back to FTS alone when the optional [semantic] extra is not installed."""
+def tool_hybrid(repo: Repo, query: str, k: int = 10,
+                promoted_only: bool = True) -> dict:
+    """Reciprocal-rank-fusion of FTS + local-embedding semantic search.
+    promoted_only=True (default) returns only vetted truth; set False to also
+    rank in unvetted pending claims. Falls back to FTS alone when the optional
+    [semantic] extra is not installed."""
     try:
-        rows = embedmod.hybrid_search(repo, query, k=k)
-        return {"query": query, "k": k, "mode": "hybrid",
+        rows = embedmod.hybrid_search(repo, query, k=k, promoted_only=promoted_only)
+        return {"query": query, "k": k, "mode": "hybrid", "promoted_only": promoted_only,
                 "count": len(rows), "results": [_cite(r) for r in rows]}
     except embedmod.EmbedError:
-        rows = [r for r in searchmod.search(repo, query) if r.get("kind") == "claim"]
-        return {"query": query, "k": k, "mode": "fts",
+        rows = [r for r in searchmod.search(repo, query, promoted_only=promoted_only)
+                if r.get("kind") == "claim"]
+        return {"query": query, "k": k, "mode": "fts", "promoted_only": promoted_only,
                 "fallback": "semantic extra not installed; keyword-only",
                 "count": len(rows[:k]), "results": [_cite(r) for r in rows[:k]]}
 
 
-def tool_graph(repo: Repo, entity: str, hops: int = 1) -> dict:
-    """Walk the context graph (§3.2) from an entity. Returns a clean error dict
-    for an unknown entity rather than raising."""
+def tool_graph(repo: Repo, entity: str, hops: int = 1,
+               promoted_only: bool = True) -> dict:
+    """Walk the context graph (§3.2) from an entity. promoted_only=True (default)
+    traverses and emits only edges whose evidence claim is promoted (or has no
+    evidence claim) — same rule the wiki renderer applies — so a client never
+    treats an unvetted relation as established. Returns a clean error dict for an
+    unknown entity rather than raising."""
     try:
-        return searchmod.graph(repo, entity, hops=hops)
+        return searchmod.graph(repo, entity, hops=hops, promoted_only=promoted_only)
     except SystemExit as e:
         return {"error": str(e), "entity": entity}
 
@@ -116,7 +124,9 @@ def tool_recall(repo: Repo, query: str, k: int = 8) -> dict:
     """Assemble a context pack for the *client* to synthesize from: top claims
     (hybrid-ranked, fanned out across promoted vs unvetted) + any approved
     synthesis prose. The server writes no prose and makes no model call."""
-    hy = tool_hybrid(repo, query, k=k * 2)
+    # Pull the mix (promoted + pending) so we can fan it out below; the buckets
+    # below are what label vetted vs unvetted for the client.
+    hy = tool_hybrid(repo, query, k=k * 2, promoted_only=False)
     promoted, pending = [], []
     for r in hy["results"]:
         (promoted if r.get("status") == "promoted" else pending).append(r)
@@ -205,16 +215,19 @@ def build_server(*, read_only: bool = False, root=None):
         return _run(lambda r: tool_search(r, terms, promoted_only, limit))
 
     @server.tool()
-    def brain_hybrid(query: str, k: int = 10) -> str:
+    def brain_hybrid(query: str, k: int = 10, promoted_only: bool = True) -> str:
         """Best-quality retrieval: fuses keyword and local semantic search.
-        Returns the top-k claims ranked by reciprocal-rank fusion."""
-        return _run(lambda r: tool_hybrid(r, query, k))
+        Returns the top-k claims ranked by reciprocal-rank fusion. promoted_only
+        (default True) restricts to vetted truth; set False to include unvetted
+        pending claims (labeled by `status`)."""
+        return _run(lambda r: tool_hybrid(r, query, k, promoted_only))
 
     @server.tool()
-    def brain_graph(entity: str, hops: int = 1) -> str:
+    def brain_graph(entity: str, hops: int = 1, promoted_only: bool = True) -> str:
         """Walk the context graph from an entity, returning related entities and
-        the relations between them (each backed by an evidence claim id)."""
-        return _run(lambda r: tool_graph(r, entity, hops))
+        the relations between them (each backed by an evidence claim id).
+        promoted_only (default True) emits only edges whose evidence is vetted."""
+        return _run(lambda r: tool_graph(r, entity, hops, promoted_only))
 
     @server.tool()
     def brain_recall(query: str, k: int = recall_k) -> str:

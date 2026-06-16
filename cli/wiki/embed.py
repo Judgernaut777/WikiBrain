@@ -70,11 +70,15 @@ def index(repo: Repo, *, only_missing: bool = True) -> int:
     return len(rows)
 
 
-def semantic_search(repo: Repo, query: str, k: int = 10) -> list[dict]:
+def semantic_search(repo: Repo, query: str, k: int = 10,
+                    *, promoted_only: bool = False) -> list[dict]:
     """Top-k claims by cosine similarity to the query."""
     np = _np()
-    rows = repo.q("SELECT e.claim_id, e.vec, c.text, c.status, c.source_id, c.origin "
-                  "FROM embeddings e JOIN claims c ON c.id = e.claim_id")
+    sql = ("SELECT e.claim_id, e.vec, c.text, c.status, c.source_id, c.origin "
+           "FROM embeddings e JOIN claims c ON c.id = e.claim_id")
+    if promoted_only:
+        sql += " WHERE c.status = 'promoted'"
+    rows = repo.q(sql)
     if not rows:
         return []
     qv = np.asarray(_model(_model_name(repo)).encode(
@@ -90,11 +94,13 @@ def semantic_search(repo: Repo, query: str, k: int = 10) -> list[dict]:
             for s, r in scored[:k]]
 
 
-def hybrid_search(repo: Repo, query: str, k: int = 10) -> list[dict]:
+def hybrid_search(repo: Repo, query: str, k: int = 10,
+                  *, promoted_only: bool = False) -> list[dict]:
     """Reciprocal-rank-fusion of keyword (FTS) and semantic results."""
     from . import search as searchmod
-    fts = [r for r in searchmod.search(repo, query) if r.get("kind") == "claim"]
-    sem = semantic_search(repo, query, k=max(k * 2, 20))
+    fts = [r for r in searchmod.search(repo, query, promoted_only=promoted_only)
+           if r.get("kind") == "claim"]
+    sem = semantic_search(repo, query, k=max(k * 2, 20), promoted_only=promoted_only)
     score: dict = {}
     info: dict = {}
     for i, r in enumerate(fts):

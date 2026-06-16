@@ -56,12 +56,22 @@ def search(repo: Repo, terms: str, *, promoted_only: bool = False) -> list[dict]
     return results
 
 
-def graph(repo: Repo, entity_name: str, hops: int = 1) -> dict:
+def graph(repo: Repo, entity_name: str, hops: int = 1,
+          *, promoted_only: bool = False) -> dict:
     start = find_entity(repo, entity_name)
     if not start:
         raise SystemExit(f"error: no entity named {entity_name!r}")
 
     names = {row["id"]: row["name"] for row in repo.q("SELECT id, name FROM entities")}
+    # Mirror the renderer (render.py): an edge's evidence is valid if its claim
+    # is promoted, or there is no evidence claim (claim_id is NULL). When
+    # promoted_only, unvetted edges are neither emitted nor traversed.
+    promoted = (None if not promoted_only else
+                {r["id"] for r in repo.q("SELECT id FROM claims WHERE status='promoted'")})
+
+    def evidence_ok(claim_id):
+        return promoted is None or claim_id is None or claim_id in promoted
+
     edges = []
     seen_edges = set()
     visited = {start["id"]}
@@ -77,6 +87,8 @@ def graph(repo: Repo, entity_name: str, hops: int = 1) -> dict:
             (node, node),
         )
         for r in rows:
+            if not evidence_ok(r["claim_id"]):
+                continue
             key = (r["src"], r["rel"], r["dst"], r["claim_id"])
             if key in seen_edges:
                 continue

@@ -176,7 +176,8 @@ def cmd_embed(args):
 
 def cmd_graph(args):
     with Repo.open() as repo:
-        res = searchmod.graph(repo, args.entity, hops=args.hops)
+        res = searchmod.graph(repo, args.entity, hops=args.hops,
+                              promoted_only=args.promoted_only)
         if _emit(res, args.json):
             return
         print(f"graph for '{res['entity']}' (≤{res['hops']} hop(s)):")
@@ -628,7 +629,10 @@ def build_parser() -> argparse.ArgumentParser:
     sem.set_defaults(func=cmd_embed)
 
     sg = sub.add_parser("graph"); sg.add_argument("entity")
-    sg.add_argument("--hops", type=int, default=1); addj(sg)
+    sg.add_argument("--hops", type=int, default=1)
+    sg.add_argument("--promoted-only", action="store_true",
+                    help="only edges whose evidence claim is promoted")
+    addj(sg)
     sg.set_defaults(func=cmd_graph)
 
     sq = sub.add_parser("queue"); qsub = sq.add_subparsers(dest="qcmd", required=True)

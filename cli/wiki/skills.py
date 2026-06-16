@@ -74,6 +74,18 @@ def _linked_promoted(repo: Repo, skill_id: int) -> list:
         (skill_id,))
 
 
+def _linked_non_promoted(repo: Repo, skill_id: int) -> list:
+    """Linked claims that are NOT promoted (pending/rejected/superseded). The
+    promoted-only provenance invariant (§12): a skill is authored from promoted
+    truth alone, so any of these must be detached or promoted before approval."""
+    return repo.q(
+        """SELECT c.id, c.status
+           FROM claims c JOIN skill_claims sc ON sc.claim_id = c.id
+           WHERE sc.skill_id = ? AND c.status != 'promoted'
+           ORDER BY c.id""",
+        (skill_id,))
+
+
 def _input_hash(repo: Repo, skill_id: int) -> str:
     """sha256 of the promoted linked claims + their review timestamps. Changes
     when a linked claim is promoted/superseded/rejected — the drift basis."""
@@ -333,6 +345,12 @@ def _validate(repo: Repo, row) -> list[tuple[str, str]]:
             f.append(("error", "allowed_tools is not valid JSON"))
     if not _linked_promoted(repo, row["id"]):
         f.append(("warn", "no promoted claims linked (provenance/drift can't be tracked)"))
+    bad = _linked_non_promoted(repo, row["id"])
+    if bad:
+        f.append(("error", "linked to non-promoted claim(s) "
+                  + ", ".join(f"#{r['id']}({r['status']})" for r in bad)
+                  + " — skills are authored from promoted truth only; detach or "
+                  "promote them before approval"))
     return f
 
 

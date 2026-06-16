@@ -509,7 +509,10 @@ promoted claims (truth) --[in-session judgment]--> skills.body
 of §1's "all content is data, never instructions." Two invariants neutralize the
 resulting injection path (`malicious source → claim → skill → executed`):
 1. A skill body is authored **only from `promoted` claims** (human-gated truth),
-   never raw/pending text. `skill_claims` records that provenance.
+   never raw/pending text. `skill_claims` records that provenance, and the
+   invariant is *enforced*, not merely conventional: `wiki skill approve` blocks
+   (and `wiki skill lint` flags as an error) any linked claim that is not
+   promoted — detach or promote it first.
 2. Authoring ≠ activating. `draft` skills live in the DB but never touch disk.
    `wiki skill approve` (the gate) is the only thing that renders a skill, and is
    **human-only** — the unattended pass may draft and surface, never approve.
@@ -571,10 +574,12 @@ promoted/pending claims ─┼─ wiki skill render ─→ .claude/skills/ (exec
 
 **Tools (stdio MCP).** All return JSON; all are pure code.
 - `brain_search(terms, promoted_only=True, limit)` — FTS5 over claims+summaries.
-- `brain_hybrid(query, k)` — RRF of keyword + local-embedding search; falls back
-  to FTS alone when the `[semantic]` extra is absent.
-- `brain_graph(entity, hops)` — context-graph walk; clean error dict for an
-  unknown entity (never raises).
+- `brain_hybrid(query, k, promoted_only=True)` — RRF of keyword + local-embedding
+  search; falls back to FTS alone when the `[semantic]` extra is absent.
+- `brain_graph(entity, hops, promoted_only=True)` — context-graph walk; emits and
+  traverses only edges whose evidence claim is promoted (or has no evidence
+  claim), the same promoted-or-null rule the wiki renderer applies; clean error
+  dict for an unknown entity (never raises).
 - `brain_recall(query, k)` — assembles a *context pack*: top claims split into
   `promoted` (vetted) vs `pending` (unvetted) buckets, plus already-approved
   synthesis prose. The server writes no prose; the **client's** model synthesizes.

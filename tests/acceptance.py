@@ -794,6 +794,50 @@ def main():
               mcpmod.tool_capture(r, "x", harness="../evil!")["origin"]
               .startswith("session/"))
 
+        # --- provenance hardening (Codex review) ----------------------------
+        # P2b: promoted-only retrieval never leaks unvetted claims (FTS path,
+        # since the [semantic] extra is absent in the offline harness).
+        hyp = mcpmod.tool_hybrid(r, term, k=20, promoted_only=True)
+        check("hybrid promoted_only yields only promoted claims",
+              all(x.get("status") == "promoted" for x in hyp["results"]))
+        check("hybrid reports its promoted_only mode", hyp["promoted_only"] is True)
+
+        # A non-promoted claim exists by now (Phase 6 rejected one). Use it to
+        # prove the graph + skill-approval provenance guards.
+        nonp = r.one("SELECT id, status FROM claims WHERE status != 'promoted' ORDER BY id LIMIT 1")
+        check("a non-promoted claim exists to test provenance guards", nonp is not None)
+
+        # P2a: graph emits an edge backed by a non-promoted claim only when NOT
+        # promoted_only (mirrors the renderer's promoted-or-null rule).
+        r.ex("INSERT OR IGNORE INTO entities(name, kind) VALUES('p7-alpha','concept')")
+        r.ex("INSERT OR IGNORE INTO entities(name, kind) VALUES('p7-beta','concept')")
+        aid = r.one("SELECT id FROM entities WHERE name='p7-alpha'")["id"]
+        bid = r.one("SELECT id FROM entities WHERE name='p7-beta'")["id"]
+        r.ex("INSERT OR IGNORE INTO relations(src, rel, dst, claim_id) VALUES(?,?,?,?)",
+             (aid, "relates_to", bid, nonp["id"]))
+        r.conn.commit()
+        g_all = mcpmod.tool_graph(r, "p7-alpha", promoted_only=False)
+        g_prom = mcpmod.tool_graph(r, "p7-alpha")  # default promoted_only=True
+        check("graph (all) includes the unvetted-evidence edge",
+              any(e["dst"] == "p7-beta" for e in g_all["edges"]))
+        check("graph (promoted-only) hides the unvetted-evidence edge",
+              not any(e["dst"] == "p7-beta" for e in g_prom["edges"]))
+
+        # P1: skill approval is blocked while a non-promoted claim is linked.
+        skillsmod.new(r, "p7-prov", "Provenance guard test.", claims=[nonp["id"]])
+        skillsmod.set_body(r, "p7-prov", "# p7\nbody")
+        approve_blocked = False
+        try:
+            skillsmod.approve(r, "p7-prov")
+        except skillsmod.SkillError:
+            approve_blocked = True
+        check("approve refused with a non-promoted linked claim", approve_blocked)
+        check("lint flags the non-promoted linkage as an error",
+              any(x["skill"] == "p7-prov" and x["severity"] == "error"
+                  and "non-promoted" in x["message"]
+                  for x in skillsmod.lint(r, "p7-prov")))
+        skillsmod.archive(r, "p7-prov")
+
         # client config snippet is well-formed and points at the repo root
         cc = mcpmod.client_config(r, read_only=True)
         srv = cc["mcpServers"]["wiki-brain"]
