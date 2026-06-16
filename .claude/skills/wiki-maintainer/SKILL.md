@@ -41,6 +41,7 @@ Queue: `wiki queue add|list|next|done|attempt`
 Render: `wiki render [--all]` · `wiki digest [--day YYYY-MM-DD]` ·
 `wiki synthesis get|set <page>` · `wiki commit "<msg>"`
 Health: `wiki lint` · `wiki health`
+Evidence: `wiki evidence file [--source N|--all]` · `wiki evidence index`
 Gather: `wiki bookmarks sync` · `wiki websearch "<q>" [--for <qid>]` · `wiki fetch <url> --for <qid>` · `wiki gather-prep`
 Gate/review: `wiki gate` · `wiki promote <ids>` · `wiki reject <ids>` ·
 `wiki supersede <old> --by <new>` · `wiki contradiction list|propose|resolve` ·

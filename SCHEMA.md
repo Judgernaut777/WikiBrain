@@ -50,6 +50,29 @@ the marker `src:<id>` (keeps the page path stable without an extra column).
 `synthesis` is the ONLY free-prose field; the renderer injects it verbatim
 between `<!-- synthesis:start -->` and `<!-- synthesis:end -->`.
 
+## Raw evidence filing
+`sources.path` is the canonical pointer to the immutable primary-source artifact.
+Fresh sources may begin in flat staging (`raw/` for added/fetched artifacts,
+`inbox/` for captures), but after `wiki file-claims` accepts an extraction the
+CLI verifies `sources.hash`, moves the artifact into a deterministic bucket under
+`raw/<bucket>/<year>/`, verifies the hash again, updates `sources.path`, and
+marks the source page dirty.
+
+Bucket rules:
+- `session/*` → `raw/sessions/<year>/`
+- `transcript` → `raw/transcripts/<year>/`
+- `image/*` mime type → `raw/images/<year>/`
+- URL-backed sources → `raw/web/<year>/`
+- dataset-like tags/extensions → `raw/datasets/<year>/`
+- document MIME/extensions → `raw/documents/<year>/`
+- fallback → `raw/uncategorized/<year>/`
+
+`raw/INDEX.md` is a generated convenience index from the `sources` table. The DB
+remains authoritative; the index is for humans and agents to quickly pull primary
+evidence by source id, bucket, path, hash, and claim counts. Use `wiki evidence
+file --all` to backfill/repair paths and `wiki evidence index` to rebuild only
+the index.
+
 ### Synthesis freshness
 `synthesis_input_hash` = sha256 of the sorted promoted-claim ids + relation ids
 feeding the page. `wiki synthesis set` stores the current hash (marking the

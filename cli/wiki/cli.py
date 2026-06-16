@@ -12,7 +12,8 @@ from .db import Repo, init_db
 from . import (ingest, search as searchmod, queue as queuemod, render as rendermod,
                lint as lintmod, health as healthmod, gather, gate as gatemod,
                review, fetch as fetchmod, drop as dropmod, extract as extractmod,
-               embed as embedmod, skills as skillsmod, mcp_server as mcpmod)
+               embed as embedmod, skills as skillsmod, mcp_server as mcpmod,
+               evidence as evidencemod)
 
 SCAFFOLD_DIRS = [
     "raw", "raw/assets", "inbox",
@@ -88,6 +89,8 @@ def cmd_file_claims(args):
         print(f"filed: {res['claims']} claims, summary={res['summary']}, "
               f"{res['contradictions']} contradiction(s), {res['questions']} question(s)"
               + (", escalated" if res['escalated'] else ""))
+        if res.get("filed", {}).get("moved"):
+            print(f"evidence: {res['filed']['old_path']} -> {res['filed']['new_path']}")
 
 
 def cmd_capture(args):
@@ -132,6 +135,38 @@ def cmd_dump(args):
     with Repo.open() as repo:
         repo.dump()
         print("db/dump.sql refreshed")
+
+
+def cmd_evidence(args):
+    with Repo.open() as repo:
+        try:
+            if args.ecmd == "file":
+                if args.source is not None:
+                    results = [evidencemod.file_source(repo, args.source)]
+                else:
+                    results = evidencemod.file_all(repo, extracted_only=not args.include_new)
+                idx = evidencemod.write_index(repo)
+                moved = sum(1 for r in results if r["moved"])
+                errors = [r for r in results if r.get("error")]
+                repo.finalize("evidence-file", f"{moved}/{len(results)} moved; index {idx}")
+                if _emit(results, args.json):
+                    return
+                print(f"evidence filed: {moved}/{len(results)} moved"
+                      + (f", {len(errors)} error(s)" if errors else ""))
+                for r in results:
+                    if r.get("error"):
+                        print(f"  ! #{r['source_id']}: {r['error']}")
+                        continue
+                    mark = "moved" if r["moved"] else "ok"
+                    print(f"  #{r['source_id']} [{r['bucket']}] {mark}: {r['new_path']}")
+            elif args.ecmd == "index":
+                idx = evidencemod.write_index(repo)
+                repo.finalize("evidence-index", idx)
+                if _emit({"path": idx}, args.json):
+                    return
+                print(f"evidence index written: {idx}")
+        except evidencemod.EvidenceError as e:
+            sys.exit(f"error: {e}")
 
 
 # --- search / graph ---------------------------------------------------------
@@ -616,6 +651,19 @@ def build_parser() -> argparse.ArgumentParser:
     sf.add_argument("--source", type=int, required=True)
     sf.add_argument("--json", dest="json_file", required=True, metavar="FILE")
     sf.set_defaults(func=cmd_file_claims)
+
+    sev = sub.add_parser("evidence", help="file and index raw primary evidence")
+    evsub = sev.add_subparsers(dest="ecmd", required=True)
+    evf = evsub.add_parser("file", help="move source artifacts into raw/<bucket>/<year>")
+    evt = evf.add_mutually_exclusive_group(required=True)
+    evt.add_argument("--source", type=int, help="file one source id")
+    evt.add_argument("--all", action="store_true", help="file all processed sources")
+    evf.add_argument("--include-new", action="store_true",
+                     help="include sources still awaiting extraction")
+    addj(evf)
+    evi = evsub.add_parser("index", help="write raw/INDEX.md from the sources table")
+    addj(evi)
+    sev.set_defaults(func=cmd_evidence)
 
     ss = sub.add_parser("search"); ss.add_argument("terms", nargs="+")
     ss.add_argument("--promoted-only", action="store_true")

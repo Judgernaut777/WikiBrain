@@ -77,6 +77,8 @@ Run the CLI any of these ways:
 .\wiki pending                                          # what needs extraction
 # (a model produces extraction JSON per the contract in the skill)
 .\wiki file-claims --source 1 --json extract.json
+# accepted extraction auto-files the raw artifact into raw/<bucket>/<year>/
+# and refreshes raw/INDEX.md so primary evidence remains easy to pull
 .\wiki gate                                             # auto-promote the boring tier
 .\wiki render ; .\wiki digest                          # rebuild pages + today's digest
 .\wiki search "caching" --hybrid                       # keyword + semantic (needs [semantic])
@@ -85,6 +87,25 @@ Run the CLI any of these ways:
 ```
 Open the `wiki/` folder as an Obsidian vault to browse (graph view works via
 `[[wikilinks]]`).
+
+## Raw evidence filing
+Primary sources stay intact and retrievable. After `wiki file-claims` accepts an
+extraction, WikiBrain verifies the source hash, moves the raw artifact out of
+flat staging into a deterministic bucket, updates `sources.path`, marks the
+source page dirty, and refreshes `raw/INDEX.md`.
+
+Buckets are derived from source metadata:
+`raw/web/<year>/`, `raw/documents/<year>/`, `raw/images/<year>/`,
+`raw/transcripts/<year>/`, `raw/sessions/<year>/`, `raw/datasets/<year>/`, or
+`raw/uncategorized/<year>/`. The database `sources` table remains the canonical
+index; `raw/INDEX.md` is the human/agent-friendly projection.
+
+Backfill or repair existing evidence with:
+```powershell
+.\wiki evidence file --all        # file all processed sources + refresh index
+.\wiki evidence file --source 12  # file one source
+.\wiki evidence index             # rebuild raw/INDEX.md only
+```
 
 ## Serve the brain over MCP
 Expose the knowledge base to any MCP client (Claude Desktop, other harnesses) as

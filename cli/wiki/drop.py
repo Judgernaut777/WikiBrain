@@ -60,12 +60,15 @@ def scan(repo: Repo, *, move: bool = True) -> list[dict]:
             ah8 = util.sha256_bytes(path.read_bytes())[:8]
             asset = assets / f"{util.slug(path.stem)}-{ah8}{path.suffix.lower()}"
             shutil.copyfile(path, asset)
-            md = (f"![{path.stem}]({asset.name})\n\n_image file: "
-                  f"`{repo.rel(asset)}` — view it to describe and label._\n\n" + md)
+            md = (f"_image file: `{repo.rel(asset)}` — view it to describe and "
+                  f"label. Binary evidence stays under `raw/assets/` even if this "
+                  f"wrapper is filed into `raw/images/<year>/`._\n\n" + md)
         content = md.encode("utf-8")
         h8 = util.sha256_bytes(content)[:8]
         dest = repo.root / "raw" / f"{util.slug(path.stem)}-{h8}.md"
-        dest.write_text(md, encoding="utf-8")
+        # write_bytes, not write_text: keep on-disk bytes == the hashed content
+        # (Windows write_text emits CRLF and would break sources.hash).
+        dest.write_bytes(content)
         try:
             sid = ingest._register_source(
                 repo, content=content, rel_path=repo.rel(dest), title=path.stem,

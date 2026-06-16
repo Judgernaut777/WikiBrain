@@ -10,7 +10,7 @@ from pathlib import Path
 
 from .db import Repo
 from .entities import get_or_create_entity
-from . import fetch, util, extract
+from . import fetch, util, extract, evidence
 
 
 class IngestError(Exception):
@@ -72,7 +72,10 @@ def add(repo: Repo, target: str, *, origin: str = "clip",
         h8 = util.sha256_bytes(content)[:8]
         name = f"{util.slug(title or target)}-{h8}.md"
         dest = repo.root / "raw" / name
-        dest.write_text(md, encoding="utf-8")
+        # write_bytes, not write_text: keep on-disk bytes == the hashed content.
+        # write_text translates \n -> \r\n on Windows, which breaks sources.hash
+        # (evidence filing verifies the hash before moving the artifact).
+        dest.write_bytes(content)
         rel = repo.rel(dest)
         warns = _near_dupe_warnings(repo, title, target)
         sid = _register_source(repo, content=content, rel_path=rel, title=title,
@@ -107,10 +110,13 @@ def capture(repo: Repo, origin_harness: str, text: str) -> int:
     name = f"{ts}-{util.slug(first_line, 40)}.md"
     dest = repo.root / "inbox" / name
     body = f"# capture: {origin_harness}\n\n_captured {util.now_iso()}_\n\n{text}\n"
-    dest.write_text(body, encoding="utf-8")
+    content = body.encode("utf-8")
+    # write_bytes, not write_text: keep on-disk bytes == the hashed content (avoid
+    # the Windows \n -> \r\n translation that would break sources.hash).
+    dest.write_bytes(content)
     rel = repo.rel(dest)
     sid = _register_source(
-        repo, content=body.encode("utf-8"), rel_path=rel,
+        repo, content=content, rel_path=rel,
         title=first_line[:120], url=None,
         origin=f"session/{origin_harness}", fetched_at=util.now_iso(),
     )
@@ -126,7 +132,9 @@ def transcribe(repo: Repo, target: str, *, whisper_model: str = "base") -> int:
     content = md.encode("utf-8")
     h8 = util.sha256_bytes(content)[:8]
     dest = repo.root / "raw" / f"{util.slug(title or target)}-{h8}.md"
-    dest.write_text(md, encoding="utf-8")
+    # write_bytes, not write_text: keep on-disk bytes == the hashed content
+    # (Windows write_text emits CRLF and would break sources.hash).
+    dest.write_bytes(content)
     url = target if fetch.is_url(target) else None
     sid = _register_source(
         repo, content=content, rel_path=repo.rel(dest), title=title, url=url,
@@ -306,6 +314,8 @@ def file_claims(repo: Repo, source_id: int, json_path: str) -> dict:
             (cat, json.dumps(tags) if tags else None, source_id))
 
     repo.ex("UPDATE sources SET status = 'extracted' WHERE id = ?", (source_id,))
+    filed = evidence.file_source(repo, source_id)
+    evidence_index = evidence.write_index(repo)
 
     escalated = False
     if data.get("low_confidence", False):
@@ -341,4 +351,6 @@ def file_claims(repo: Repo, source_id: int, json_path: str) -> dict:
         "questions": queued,
         "escalated": escalated,
         "summary": bool(summary_text),
+        "filed": filed,
+        "evidence_index": evidence_index,
     }

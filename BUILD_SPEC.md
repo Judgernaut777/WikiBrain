@@ -195,12 +195,14 @@ refreshes `db/dump.sql`.
 | `wiki init` | Create DB at configured path, apply DDL, scaffold repo dirs |
 | `wiki add <file-or-url>` | URL: fetch, strip to markdown (use `trafilatura`), save under `raw/`; file: copy into `raw/`. Hash, dedupe (exact hash + FTS near-dupe warn), register in `sources` with origin |
 | `wiki pending` | List sources with status `new` (what needs extraction) |
-| `wiki file-claims --source <id> --json <file>` | Validate extraction JSON against schema (§3.3); insert claims/summary/entities/relations as `pending`; mark source `extracted`; auto-open `contradictions` rows for new claims that FTS-match promoted claims with conflicting polarity hints; create `escalations` row if extractor flagged low confidence |
+| `wiki file-claims --source <id> --json <file>` | Validate extraction JSON against schema (§3.3); insert claims/summary/entities/relations as `pending`; mark source `extracted`; auto-open `contradictions` rows for new claims that FTS-match promoted claims with conflicting polarity hints; create `escalations` row if extractor flagged low confidence; hash-verify and file the raw artifact into `raw/<bucket>/<year>/`, update `sources.path`, refresh `raw/INDEX.md` |
 | `wiki search <terms>` | FTS5 over claims + summaries; returns rows with ids, status, provenance. `--promoted-only` flag |
 | `wiki graph <entity> [--hops N]` | Walk relations from an entity; text output of edges with evidence claim ids |
 | `wiki queue add\|list\|next\|done` | Manage `research_queue` |
 | `wiki capture --origin <harness> "<text>"` | Write timestamped note into `inbox/`, register as source with origin `session/<harness>` |
 | `wiki dump` | Refresh `db/dump.sql` (called automatically by mutators) |
+| `wiki evidence file [--source <id>\|--all]` | Backfill/repair evidence filing: verify hashes, move processed sources to deterministic raw buckets, update `sources.path`, refresh `raw/INDEX.md` |
+| `wiki evidence index` | Rebuild the generated raw evidence index from the `sources` table |
 
 ### 3.3 Extraction JSON contract
 

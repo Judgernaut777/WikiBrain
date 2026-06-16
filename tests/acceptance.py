@@ -24,7 +24,7 @@ from wiki import (ingest, search as searchmod, queue as queuemod,            # n
                   render as rendermod, lint as lintmod, health as healthmod,
                   review, gate as gatemod, gather, fetch as fetchmod,
                   migrate as migratemod, schema as schemamod, drop as dropmod,
-                  skills as skillsmod, mcp_server as mcpmod)
+                  skills as skillsmod, mcp_server as mcpmod, evidence as evidencemod)
 
 PASS, FAIL = 0, 0
 
@@ -433,6 +433,33 @@ def main():
         res = ingest.file_claims(r, 1, str(rel("good.json")))
     check("filed 2 claims", res["claims"] == 2)
     check("queued 1 proposed question", res["questions"] == 1)
+    check("file-claims files raw evidence into a categorized bucket",
+          res["filed"]["moved"] and res["filed"]["new_path"].startswith("raw/uncategorized/"))
+    with Repo.open(start=root) as r:
+        filed_path = r.one("SELECT path FROM sources WHERE id=1")["path"]
+    check("sources.path follows the filed evidence path",
+          filed_path == res["filed"]["new_path"])
+    check("raw evidence index is generated automatically",
+          (root / "raw" / "INDEX.md").exists()
+          and "Stack notes" in (root / "raw" / "INDEX.md").read_text(encoding="utf-8"))
+    with Repo.open(start=root) as r:
+        again = evidencemod.file_source(r, 1)
+    check("evidence filing is idempotent", again["moved"] is False)
+
+    # Regression: an ingested artifact's on-disk bytes must equal sources.hash.
+    # On Windows, write_text translates \n -> \r\n, so the file would hash
+    # differently than the recorded (LF) content and evidence filing would refuse
+    # to move it. Capture writes bytes; this guards that across platforms.
+    import hashlib as _hashlib
+    with Repo.open(start=root) as r:
+        cap_id = ingest.capture(r, "roundtrip", "line one\nline two\nline three")
+        crow = r.one("SELECT path, hash FROM sources WHERE id=?", (cap_id,))
+        disk = (root / crow["path"]).read_bytes()
+        check("captured file's on-disk bytes match its recorded hash",
+              _hashlib.sha256(disk).hexdigest() == crow["hash"])
+        filed = evidencemod.file_source(r, cap_id)  # raises if the hash mismatched
+        check("a captured source files cleanly into raw/sessions",
+              filed["bucket"] == "sessions")
 
     # bad JSON rejected
     write(rel("bad.json"), json.dumps({"source_id": 1, "summary": "x",
