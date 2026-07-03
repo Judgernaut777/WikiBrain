@@ -52,6 +52,12 @@ MIGRATIONS: dict[int, list[str]] = {
         " allowed_tools TEXT, input_hash TEXT, claim_ids TEXT NOT NULL DEFAULT '[]',"
         " note TEXT, created_at TEXT NOT NULL, UNIQUE(skill_id, version))",
     ],
+    6: [  # hot-path indexes (status/source/entity/relation lookups)
+        "CREATE INDEX claims_status ON claims(status)",
+        "CREATE INDEX claims_source_id ON claims(source_id)",
+        "CREATE INDEX claim_entities_entity_id ON claim_entities(entity_id)",
+        "CREATE INDEX relations_dst ON relations(dst)",
+    ],
 }
 
 

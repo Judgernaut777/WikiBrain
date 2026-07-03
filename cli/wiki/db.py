@@ -83,6 +83,12 @@ class Repo:
         out.parent.mkdir(parents=True, exist_ok=True)
         lines = []
         for line in self.conn.iterdump():
+            # embeddings are regenerable (`wiki embed --all`) and, packed as hex
+            # float32 BLOBs, would otherwise bloat this git-committed file once
+            # the [semantic] extra is in use. Keep the CREATE TABLE (schema stays
+            # round-trippable) but drop the row data.
+            if line.startswith('INSERT INTO "embeddings"'):
+                continue
             lines.append(line)
         out.write_text("\n".join(lines) + "\n", encoding="utf-8")
 

@@ -74,17 +74,21 @@ def semantic_search(repo: Repo, query: str, k: int = 10,
                     *, promoted_only: bool = False) -> list[dict]:
     """Top-k claims by cosine similarity to the query."""
     np = _np()
-    sql = ("SELECT e.claim_id, e.vec, c.text, c.status, c.source_id, c.origin "
-           "FROM embeddings e JOIN claims c ON c.id = e.claim_id")
+    name = _model_name(repo)
+    sql = ("SELECT e.claim_id, e.vec, e.dim, c.text, c.status, c.source_id, c.origin "
+           "FROM embeddings e JOIN claims c ON c.id = e.claim_id WHERE e.model = ?")
+    params = [name]
     if promoted_only:
-        sql += " WHERE c.status = 'promoted'"
-    rows = repo.q(sql)
+        sql += " AND c.status = 'promoted'"
+    rows = repo.q(sql, params)
     if not rows:
         return []
-    qv = np.asarray(_model(_model_name(repo)).encode(
+    qv = np.asarray(_model(name).encode(
         [query], normalize_embeddings=True)[0], dtype=np.float32)
     scored = []
     for r in rows:
+        if r["dim"] != qv.shape[0]:
+            continue  # stale/mismatched vector (e.g. leftover from a prior model)
         v = np.frombuffer(r["vec"], dtype=np.float32)
         scored.append((float(np.dot(qv, v)), r))
     scored.sort(key=lambda x: x[0], reverse=True)

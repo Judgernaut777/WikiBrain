@@ -70,13 +70,28 @@ def main():
     import sqlite3 as _sqlite
     check("SCHEMA_VERSION matches latest migration",
           schemamod.SCHEMA_VERSION == migratemod.latest_version())
-    # Build an old-shape (v1) sources table lacking the new columns.
+    # Build an old-shape (v1) DB: sources lacking the new columns, plus the core
+    # tables (claims/entities/relations/claim_entities) that have existed since
+    # v1 and that the v6 index migration targets.
     old_db = Path(tempfile.mkdtemp(prefix="wikibrain-mig-")) / "old.db"
     c = _sqlite.connect(str(old_db))
     c.executescript(
         "CREATE TABLE sources (id INTEGER PRIMARY KEY, hash TEXT UNIQUE NOT NULL, "
         "path TEXT NOT NULL, title TEXT, url TEXT, origin TEXT NOT NULL, "
-        "fetched_at TEXT, ingested_at TEXT, status TEXT NOT NULL DEFAULT 'new');")
+        "fetched_at TEXT, ingested_at TEXT, status TEXT NOT NULL DEFAULT 'new');"
+        "CREATE TABLE claims (id INTEGER PRIMARY KEY, text TEXT NOT NULL, "
+        "source_id INTEGER NOT NULL REFERENCES sources(id), location TEXT, "
+        "confidence REAL NOT NULL, origin TEXT NOT NULL, "
+        "status TEXT NOT NULL DEFAULT 'pending', superseded_by INTEGER REFERENCES claims(id), "
+        "created_at TEXT NOT NULL, reviewed_at TEXT);"
+        "CREATE TABLE entities (id INTEGER PRIMARY KEY, name TEXT UNIQUE NOT NULL, "
+        "kind TEXT NOT NULL, aliases TEXT NOT NULL DEFAULT '[]');"
+        "CREATE TABLE relations (id INTEGER PRIMARY KEY, src INTEGER NOT NULL REFERENCES entities(id), "
+        "rel TEXT NOT NULL, dst INTEGER NOT NULL REFERENCES entities(id), "
+        "claim_id INTEGER REFERENCES claims(id), UNIQUE(src, rel, dst, claim_id));"
+        "CREATE TABLE claim_entities (claim_id INTEGER NOT NULL REFERENCES claims(id), "
+        "entity_id INTEGER NOT NULL REFERENCES entities(id), PRIMARY KEY (claim_id, entity_id));"
+    )
     c.execute("INSERT INTO sources(hash, path, origin) VALUES ('h1','raw/x.md','clip')")
     c.execute("PRAGMA user_version=1")
     c.commit()
@@ -93,6 +108,9 @@ def main():
     check("migrate v5 adds skills.version column", "version" in _skill_cols)
     check("existing row gets default tags='[]'",
           c.execute("SELECT tags FROM sources WHERE hash='h1'").fetchone()[0] == "[]")
+    _idx = {row[0] for row in c.execute("SELECT name FROM sqlite_master WHERE type='index'")}
+    check("migrate v6 creates hot-path indexes",
+          {"claims_status", "claims_source_id", "claim_entities_entity_id", "relations_dst"} <= _idx)
     migratemod.migrate(c)  # idempotent re-run
     check("migrate is idempotent",
           c.execute("PRAGMA user_version").fetchone()[0] == ver)
@@ -100,7 +118,11 @@ def main():
     # Fresh init_db DBs are already at latest -> migrate is a no-op there.
     with Repo.open(start=root) as r:
         fresh_cols = {row[1] for row in r.conn.execute("PRAGMA table_info(sources)")}
+        fresh_idx = {row[0] for row in r.conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='index'")}
     check("fresh install already has new columns", {"mime_type", "category", "tags"} <= fresh_cols)
+    check("fresh install already has hot-path indexes",
+          {"claims_status", "claims_source_id", "claim_entities_entity_id", "relations_dst"} <= fresh_idx)
 
     # ---------------- Publish hygiene (leak guard) ----------------
     print("[publish] tracked files carry no machine paths; example config valid")
@@ -413,6 +435,71 @@ def main():
               bool(hits) and "cache" in hits[0]["text"].lower())
     else:
         print("    (real ranking skipped — set WIKI_TEST_SEMANTIC=1 with [semantic] installed)")
+
+    # Mixed-model embeddings: stub the encoder (no [semantic] extra needed) and
+    # verify semantic_search only ranks vectors from the CURRENT model, ignoring
+    # rows from a different model or with a mismatched dim.
+    import numpy as _npt
+    mmtmp = Path(tempfile.mkdtemp(prefix="wikibrain-mixedmodel-"))
+    mmroot = make_repo(mmtmp)
+    write(mmroot / "mm.md", "src")
+    with Repo.open(start=mmroot) as r:
+        mmsid, _ = ingest.add(r, str(mmroot / "mm.md"), origin="clip", title="mm")
+        for txt in ("old-model claim", "current-model claim", "mismatched-dim claim"):
+            r.ex("INSERT INTO claims(text, source_id, confidence, origin, status, "
+                 "created_at) VALUES (?, ?, 0.9, 'clip', 'promoted', '2026-01-01T00:00:00Z')",
+                 (txt, mmsid))
+        r.conn.commit()
+        cids = {row["text"]: row["id"] for row in r.q("SELECT id, text FROM claims")}
+        cur_name = embedmod._model_name(r)
+        v3 = _npt.asarray([1.0, 0.0, 0.0], dtype=_npt.float32).tobytes()
+        v2 = _npt.asarray([1.0, 0.0], dtype=_npt.float32).tobytes()
+        r.ex("INSERT INTO embeddings(claim_id, model, dim, vec, created_at) VALUES (?,?,?,?,?)",
+             (cids["old-model claim"], "some-other-model", 3, v3, "2026-01-01T00:00:00Z"))
+        r.ex("INSERT INTO embeddings(claim_id, model, dim, vec, created_at) VALUES (?,?,?,?,?)",
+             (cids["current-model claim"], cur_name, 3, v3, "2026-01-01T00:00:00Z"))
+        r.ex("INSERT INTO embeddings(claim_id, model, dim, vec, created_at) VALUES (?,?,?,?,?)",
+             (cids["mismatched-dim claim"], cur_name, 2, v2, "2026-01-01T00:00:00Z"))
+        r.conn.commit()
+        _orig_model = embedmod._model
+        embedmod._model = lambda name: _types.SimpleNamespace(
+            encode=lambda texts, normalize_embeddings=True: [[1.0, 0.0, 0.0]])
+        try:
+            mm_hits = embedmod.semantic_search(r, "q", k=10)
+        finally:
+            embedmod._model = _orig_model
+    mm_ids = {h["id"] for h in mm_hits}
+    check("semantic_search excludes vectors from a different model",
+          cids["old-model claim"] not in mm_ids)
+    check("semantic_search excludes dim-mismatched vectors",
+          cids["mismatched-dim claim"] not in mm_ids)
+    check("semantic_search ranks only the current-model claim",
+          mm_ids == {cids["current-model claim"]})
+
+    # ---------------- Dump scaling (#7) ----------------
+    print("[dump] embeddings row DATA excluded from db/dump.sql")
+    dtmp = Path(tempfile.mkdtemp(prefix="wikibrain-dump-"))
+    droot = make_repo(dtmp)
+    write(droot / "d.md", "src")
+    with Repo.open(start=droot) as r:
+        dsid, _ = ingest.add(r, str(droot / "d.md"), origin="clip", title="d")
+        r.ex("INSERT INTO claims(text, source_id, confidence, origin, status, created_at) "
+             "VALUES ('dumped claim', ?, 0.9, 'clip', 'promoted', '2026-01-01T00:00:00Z')",
+             (dsid,))
+        r.conn.commit()
+        dcid = r.one("SELECT id FROM claims WHERE text='dumped claim'")["id"]
+        vec = _npt.asarray([1.0, 0.0, 0.0], dtype=_npt.float32).tobytes()
+        r.ex("INSERT INTO embeddings(claim_id, model, dim, vec, created_at) VALUES (?,?,?,?,?)",
+             (dcid, "m", 3, vec, "2026-01-01T00:00:00Z"))
+        r.finalize("embed", "test embed for dump")
+    dump_text = (droot / "db" / "dump.sql")
+    dump_text = dump_text.read_text(encoding="utf-8")
+    check("dump.sql keeps the embeddings CREATE TABLE",
+          'CREATE TABLE embeddings' in dump_text)
+    check("dump.sql has no embeddings INSERT rows",
+          'INSERT INTO "embeddings"' not in dump_text)
+    check("dump.sql still has the claims INSERT row",
+          'INSERT INTO "claims"' in dump_text and "dumped claim" in dump_text)
 
     # ---------------- Phase 1 ----------------
     print("[Phase 1] ingest / search / graph")

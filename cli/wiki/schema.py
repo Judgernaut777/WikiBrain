@@ -97,6 +97,13 @@ CREATE TABLE pages (
   synthesis_input_hash TEXT
 );
 
+-- Hot-path indexes: status filtering, per-source claim lookup, entity/relation
+-- graph traversal.
+CREATE INDEX claims_status ON claims(status);
+CREATE INDEX claims_source_id ON claims(source_id);
+CREATE INDEX claim_entities_entity_id ON claim_entities(entity_id);
+CREATE INDEX relations_dst ON relations(dst);
+
 CREATE VIRTUAL TABLE claims_fts USING fts5(text, content=claims, content_rowid=id);
 CREATE VIRTUAL TABLE summaries_fts USING fts5(text, content=summaries, content_rowid=id);
 
@@ -202,4 +209,4 @@ ALL_DDL = CORE_DDL + EXT_DDL
 
 # User-version stamped on the DB. Keep in sync with migrate.latest_version()
 # (the migration runner carries existing DBs forward to this version).
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
