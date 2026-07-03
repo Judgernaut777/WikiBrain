@@ -1812,6 +1812,69 @@ def main():
     check("watchdog absent -> import guard returns (None, None) cleanly",
           (Observer, Handler) == (None, None) or (Observer is not None and Handler is not None))
 
+    # ---------------- Dump debounce (BUILD) ----------------
+    print("[dump] db/dump.sql is written once per Repo lifetime, not once per finalize()")
+    ddroot = make_repo(Path(tempfile.mkdtemp(prefix="wikibrain-dump-debounce-")))
+    write(ddroot / "d1.md", "src1")
+    write(ddroot / "d2.md", "src2")
+    write(ddroot / "d3.md", "src3")
+
+    _orig_dump = Repo.dump
+    _dump_calls = []
+
+    def _counting_dump(self):
+        _dump_calls.append(1)
+        return _orig_dump(self)
+
+    Repo.dump = _counting_dump
+    try:
+        with Repo.open(start=ddroot) as r:
+            for i, fname in enumerate(("d1.md", "d2.md", "d3.md"), start=1):
+                # ingest.add() itself calls finalize(); plus our own explicit
+                # finalize() below -> 2 finalize() calls per loop, 6 total.
+                sid, _ = ingest.add(r, str(ddroot / fname), origin="clip", title=f"d{i}")
+                r.ex("INSERT INTO claims(text, source_id, confidence, origin, status, "
+                     "created_at) VALUES (?, ?, 0.9, 'clip', 'promoted', "
+                     "'2026-01-01T00:00:00Z')", (f"debounce claim {i}", sid))
+                r.finalize("test", f"finalize #{i}")
+            check("dump.sql NOT yet written mid-context (still pending)",
+                  len(_dump_calls) == 0)
+        check("6 finalize() calls in one Repo context -> exactly 1 dump() write",
+              len(_dump_calls) == 1)
+    finally:
+        Repo.dump = _orig_dump
+
+    dd_text = (ddroot / "db" / "dump.sql").read_text(encoding="utf-8")
+    check("debounced dump.sql still has all 3 claims (content unchanged by batching)",
+          all(f"debounce claim {i}" in dd_text for i in (1, 2, 3)))
+    check("debounced dump.sql keeps the embeddings CREATE TABLE",
+          "CREATE TABLE embeddings" in dd_text)
+    check("debounced dump.sql has no embeddings INSERT rows",
+          'INSERT INTO "embeddings"' not in dd_text)
+
+    # `wiki dump` / `wiki init` call repo.dump() directly to force an
+    # immediate refresh -- that must still work, and must bypass/clear the
+    # pending-flag debounce so __exit__ doesn't redundantly dump again.
+    _dump_calls.clear()
+    Repo.dump = _counting_dump
+    try:
+        with Repo.open(start=ddroot) as r:
+            ssid = r.one("SELECT id FROM sources LIMIT 1")["id"]
+            r.ex("INSERT INTO claims(text, source_id, confidence, origin, status, "
+                 "created_at) VALUES ('forced-dump claim', ?, 0.9, 'clip', 'promoted', "
+                 "'2026-01-01T00:00:00Z')", (ssid,))
+            r.finalize("test", "finalize before forced dump")
+            r.dump()  # what cmd_dump / cmd_init call
+            check("explicit repo.dump() (wiki dump/init path) writes immediately",
+                  len(_dump_calls) == 1)
+        check("__exit__ does not re-dump after an explicit dump() already flushed it",
+              len(_dump_calls) == 1)
+    finally:
+        Repo.dump = _orig_dump
+    forced_text = (ddroot / "db" / "dump.sql").read_text(encoding="utf-8")
+    check("forced dump.sql picked up the new claim",
+          "forced-dump claim" in forced_text)
+
     print(f"\nRESULT: {PASS} passed, {FAIL} failed")
     sys.exit(1 if FAIL else 0)
 

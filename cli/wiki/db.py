@@ -19,6 +19,7 @@ class Repo:
     def __init__(self, config: Config, conn: sqlite3.Connection):
         self.cfg = config
         self.conn = conn
+        self._dump_pending = False
 
     # --- lifecycle -----------------------------------------------------------
     @classmethod
@@ -49,8 +50,19 @@ class Repo:
         return self
 
     def __exit__(self, *exc):
+        self.flush()
         self.close()
         return False
+
+    def flush(self):
+        """Write db/dump.sql if a finalize() since the last dump left it pending.
+
+        Every `with Repo.open() as r:` block calls this on exit, so N
+        finalize() calls within one Repo lifetime still produce exactly one
+        dump write (BUILD debounce), instead of one rewrite per mutation.
+        """
+        if self._dump_pending:
+            self.dump()
 
     # --- paths ---------------------------------------------------------------
     @property
@@ -73,12 +85,17 @@ class Repo:
 
     # --- mutation finalize ---------------------------------------------------
     def finalize(self, op: str, summary: str):
-        """Commit, refresh dump.sql, append to log.md. Call after a mutation."""
+        """Commit, mark dump.sql for refresh, append to log.md. Call after a
+        mutation. The dump itself is deferred (see `flush`) so a command that
+        finalizes many times only rewrites db/dump.sql once, on Repo exit."""
         self.conn.commit()
-        self.dump()
+        self._dump_pending = True
         self.log(op, summary)
 
     def dump(self):
+        """Rewrite db/dump.sql immediately. Public for callers that force a
+        refresh outside of finalize() (e.g. `wiki dump`, `wiki init`)."""
+        self._dump_pending = False
         out = self.root / "db" / "dump.sql"
         out.parent.mkdir(parents=True, exist_ok=True)
         lines = []
