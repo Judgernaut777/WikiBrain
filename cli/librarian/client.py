@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 import urllib.error
 import urllib.request
 
@@ -37,6 +38,34 @@ def _post_json(url: str, payload: dict, headers: dict, timeout: int) -> dict:
         raise ModelCallError(f"HTTP {e.code} from {url}: {detail}") from e
     except Exception as e:
         raise ModelCallError(f"model endpoint unreachable ({url}): {e}") from e
+
+
+# Patched to a no-op in tests so retry backoff doesn't actually sleep.
+_sleep = time.sleep
+
+
+def _is_transient(err: "ModelCallError") -> bool:
+    """A network hiccup or server-side 5xx worth retrying — as opposed to a 4xx
+    (deterministic client error, e.g. a rejected response_format param) which must
+    propagate immediately so callers can react."""
+    m = str(err)
+    return "unreachable" in m or "HTTP 5" in m
+
+
+def _post_resilient(url, payload, headers, timeout, retries: int) -> dict:
+    """`_post_json` with exponential-backoff retries on TRANSIENT failures only.
+    The endpoint is treated as a remote API (agents on one box, inference on
+    another), so a single connection blip or 5xx shouldn't abort a whole pass."""
+    delay = 1.0
+    for attempt in range(retries + 1):
+        try:
+            return _post_json(url, payload, headers, timeout)
+        except ModelCallError as e:
+            if attempt < retries and _is_transient(e):
+                _sleep(delay)
+                delay *= 2
+                continue
+            raise
 
 
 def reachable(cfg: LibrarianConfig, *, timeout: int = 5) -> tuple[bool, str]:
@@ -83,16 +112,17 @@ def chat(cfg: LibrarianConfig, task: str, messages: list[dict],
     if max_tokens:  # 0/None -> omit, let the server decide
         payload["max_tokens"] = int(max_tokens)
     timeout = int(cfg.get("timeout"))
+    retries = int(cfg.get("network_retries") or 0)
     if json_object:
         try:
-            data = _post_json(url, {**payload, "response_format": {"type": "json_object"}},
-                              headers, timeout)
+            data = _post_resilient(url, {**payload, "response_format": {"type": "json_object"}},
+                                   headers, timeout, retries)
             return _content(data)
         except ModelCallError as e:
             # Some servers 400 on response_format; fall through and try plain.
             if "HTTP 4" not in str(e):
                 raise
-    data = _post_json(url, payload, headers, timeout)
+    data = _post_resilient(url, payload, headers, timeout, retries)
     return _content(data)
 
 

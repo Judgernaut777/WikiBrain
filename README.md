@@ -144,25 +144,31 @@ synthesize = "deepseek/deepseek-chat"   # page prose + skill drafts
 the key env var is set, and a live **reachability** check — run it first if a
 pass fails.
 
-**Local gateway (llama-swap / LiteLLM / a router).** If you run several GGUF
-models behind an OpenAI-compatible gateway, point `base_url` at it and route each
-task to a different friendly name:
+**A separate inference box (agents here, models there).** The librarian treats
+inference as a plain remote API, so you can run it on one machine and your models
+on another. Point `base_url` at the other box's OpenAI-compatible gateway
+(llama-swap / LiteLLM / a router) and authenticate with a token — exactly like a
+hosted provider:
 ```toml
 [librarian]
-base_url = "http://127.0.0.1:4000/v1"       # a LiteLLM/llama-swap gateway
-model    = "qwen2.5-coder-14b"
+base_url    = "http://inferencebox.lan:4000/v1"   # the model box's gateway (LAN/VPN address)
+api_key_env = "INFERENCEBOX_TOKEN"                # a token; export the value in your shell
+model       = "qwen2.5-coder-14b"
 [librarian.models]
 extract    = "qwen2.5-coder-14b"            # reliable structured-JSON extraction
 triage     = "ornith-1.0-9b"                # fast per-claim reasoning
 adjudicate = "ornith-1.0-35b"               # hardest judgement, lowest volume
 synthesize = "ornith-1.0-35b"               # prose + skill drafts
 ```
-**Reasoning models** (Ornith, DeepSeek-R1, QwQ, …) work out of the box: the
-librarian sends a generous `max_tokens` (config, default 4096 — raise it if a
-model thinks a lot) so they don't truncate before the JSON, and it strips the
-`<think>…</think>` preamble from the reply automatically. If your gateway has a
-`model = "auto"` router, set that as the top-level `model` and drop the per-task
-table to let it classify.
+The gateway must be reachable from the agent box: bind it on the LAN (not
+`127.0.0.1`) behind a firewall / reverse proxy / VPN, or tunnel it. Because the
+link is a network now, the librarian retries transient failures (connection blips,
+5xx) with backoff — tune with `network_retries` (default 2). **Reasoning models**
+(Ornith, DeepSeek-R1, QwQ, …) work out of the box: it sends a generous `max_tokens`
+(default 4096 — raise it if a model thinks a lot) so they don't truncate before
+the JSON, and strips the `<think>…</think>` preamble automatically. If your gateway
+exposes a `model = "auto"` router, set that as the top-level `model` and drop the
+per-task table to let it classify.
 
 ## Design boundaries
 - The `wiki` CLI contains **zero model calls** (a billing + determinism

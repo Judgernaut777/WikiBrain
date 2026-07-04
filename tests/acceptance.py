@@ -2154,6 +2154,46 @@ def main():
     finally:
         libclient._post_json = _c_orig
 
+    # ---------------- Remote-API resilience (transient retry w/ backoff) ------
+    print("[librarian-remote] transient failures retry; 4xx propagates")
+    rmt = make_repo(Path(tempfile.mkdtemp(prefix="wikibrain-rmt-")))
+    write(rmt / "config.toml", (rmt / "config.toml").read_text(encoding="utf-8")
+          + '[librarian]\nmodel = "remote"\nbase_url = "http://box.lan/v1"\nnetwork_retries = 2\n')
+    rmt_cfg = _RCfg.load(start=rmt)
+    _sleep_orig = libclient._sleep
+    libclient._sleep = lambda *_a, **_k: None   # don't actually back off in tests
+    _pj_orig = libclient._post_json
+    try:
+        # a connection blip then success: retried transparently
+        calls = {"n": 0}
+        def _flaky(url, payload, headers, timeout):
+            calls["n"] += 1
+            if calls["n"] < 3:
+                raise libclient.ModelCallError("model endpoint unreachable (http://box.lan/v1): boom")
+            return {"choices": [{"message": {"content": '{"ok": true}'}}]}
+        libclient._post_json = _flaky
+        out = libclient.chat(rmt_cfg, "extract", [{"role": "user", "content": "hi"}])
+        check("transient failures are retried then succeed (3 attempts)",
+              '"ok"' in out and calls["n"] == 3)
+
+        # a 4xx is deterministic: must NOT be retried (raises after 1 call)
+        calls4 = {"n": 0}
+        def _four(url, payload, headers, timeout):
+            calls4["n"] += 1
+            raise libclient.ModelCallError("HTTP 401 from http://box.lan/v1: bad key")
+        libclient._post_json = _four
+        raised = False
+        try:
+            # json_object path falls back to plain on 4xx, so 2 posts max, no retries
+            libclient.chat(rmt_cfg, "extract", [{"role": "user", "content": "hi"}])
+        except libclient.ModelCallError:
+            raised = True
+        check("a 4xx is not retried (auth error surfaces fast)",
+              raised and calls4["n"] <= 2)
+    finally:
+        libclient._post_json = _pj_orig
+        libclient._sleep = _sleep_orig
+
     print(f"\nRESULT: {PASS} passed, {FAIL} failed")
     sys.exit(1 if FAIL else 0)
 

@@ -98,12 +98,15 @@ model = "qwen3:14b"
 # adjudicate = "claude-sonnet-5"            # contradictions/escalations — lowest volume, hardest
 # synthesize = "claude-sonnet-5"            # page prose + skill drafts
 
-# --- Example: a local OpenAI-compatible GATEWAY (llama-swap / LiteLLM /
-# fleet-router) fronting several GGUF models, with per-task routing. Point
-# base_url at the gateway's /v1 and use its friendly model names. Reasoning
-# models (e.g. Ornith) need generous max_tokens (below) and emit a <think>
-# preamble that the librarian strips automatically.
-# base_url = "http://127.0.0.1:4000/v1"     # LiteLLM unified gateway
+# --- Example: a REMOTE OpenAI-compatible GATEWAY (llama-swap / LiteLLM /
+# fleet-router on another machine) fronting several GGUF models, with per-task
+# routing. The librarian treats it exactly like a hosted API: point base_url at
+# the box's address (NOT 127.0.0.1 — the gateway must be bound/exposed on the LAN,
+# behind a firewall or reverse proxy) and authenticate with a token via
+# api_key_env. Reasoning models (e.g. Ornith) need generous max_tokens (below) and
+# emit a <think> preamble the librarian strips automatically.
+# base_url    = "http://inferencebox.lan:4000/v1"   # a remote LiteLLM gateway
+# api_key_env = "INFERENCEBOX_TOKEN"                # LiteLLM master key, from the env
 # [librarian.models]
 # extract    = "qwen2.5-coder-14b"          # reliable structured-JSON extraction
 # triage     = "ornith-1.0-9b"              # fast per-claim reasoning
@@ -115,6 +118,7 @@ max_source_chars = 24000         # truncate raw source text sent to the model
 timeout = 180                    # seconds per model call
 temperature = 0.2
 retries = 1                      # re-ask attempts when output fails the contract
+network_retries = 2              # transient (connection/5xx) retries w/ backoff
 # Output token cap per call (sent as max_tokens; 0 omits it). Reasoning models
 # spend tokens thinking before the JSON, so keep this >= ~2048 for them.
 max_tokens = 4096

@@ -21,6 +21,10 @@ DEFAULTS = {
     "timeout": 180,         # seconds per model call
     "temperature": 0.2,
     "retries": 1,           # re-ask attempts when output fails the contract
+    # Transient-failure retries (connection blip / 5xx) with exponential backoff.
+    # Inference is treated as a remote API — agents on one box, the model on
+    # another — so a single network hiccup shouldn't abort a whole pass.
+    "network_retries": 2,
     # Output token cap per call. Sent as max_tokens; 0/None omits it (server
     # default). Reasoning models (e.g. Ornith) spend tokens on a <think> preamble
     # before the JSON, so they need generous headroom — keep this >= ~2048 for
