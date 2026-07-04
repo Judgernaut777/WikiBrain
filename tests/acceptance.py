@@ -2104,6 +2104,56 @@ def main():
     finally:
         libclient.reachable = _reach_orig2
 
+    # ---------------- Reasoning-model support (max_tokens + <think> strip) ----
+    print("[librarian-reasoning] max_tokens sent; <think> preamble stripped")
+    from librarian.config import LibrarianConfig as _RCfg
+    rr = make_repo(Path(tempfile.mkdtemp(prefix="wikibrain-rr-")))
+    write(rr / "config.toml", (rr / "config.toml").read_text(encoding="utf-8")
+          + '[librarian]\nmodel = "reasoner"\nbase_url = "http://stub/v1"\nmax_tokens = 4096\n')
+    rcfg = _RCfg.load(start=rr)
+
+    # (1) client.chat must send max_tokens; capture the outgoing payload.
+    seen = {}
+    def _capture(url, payload, headers, timeout):
+        seen.update(payload)
+        return {"choices": [{"message": {"content": '{"ok": true}'}}]}
+    _c_orig = libclient._post_json
+    libclient._post_json = _capture
+    try:
+        libclient.chat(rcfg, "extract", [{"role": "user", "content": "hi"}])
+    finally:
+        libclient._post_json = _c_orig
+    check("client sends max_tokens from config", seen.get("max_tokens") == 4096)
+
+    # (2) a <think> reasoning preamble is stripped before the JSON is parsed.
+    stripped = libclient.strip_reasoning(
+        "<think>let me consider the options carefully { not json }</think>\n"
+        '{"recommendation": "hold", "confidence": 0.4, "reason": "unsure"}')
+    check("strip_reasoning removes the <think> block", "<think>" not in stripped
+          and stripped.startswith("{"))
+
+    # end-to-end: a reasoning reply (think preamble + JSON) triages cleanly.
+    with Repo.open(start=rr) as r:
+        rsid = ingest.capture(r, "t", "reasoning-model candidate")
+        ingest.file_claims_data(r, rsid, {"source_id": rsid, "summary": "s",
+            "claims": [{"text": "A reasoned claim.", "confidence": 0.5,
+                        "entities": ["Topic"]}], "low_confidence": False})
+        rcid = r.one("SELECT id FROM claims WHERE source_id=?", (rsid,))["id"]
+    def _reasoning_reply(url, payload, headers, timeout):
+        return {"choices": [{"message": {"content":
+            "<think>The claim is speculative; braces { } inside thinking should "
+            'not confuse the parser.</think>{"recommendation": "hold", '
+            '"confidence": 0.3, "reason": "speculative"}'}}]}
+    libclient._post_json = _reasoning_reply
+    try:
+        from librarian import triage as _ltri
+        with Repo.open(start=rr) as r:
+            rec = _ltri.triage_claim(r, rcfg, rcid)
+        check("reasoning-model reply triages despite braces in the <think> block",
+              rec["recommendation"] == "hold")
+    finally:
+        libclient._post_json = _c_orig
+
     print(f"\nRESULT: {PASS} passed, {FAIL} failed")
     sys.exit(1 if FAIL else 0)
 

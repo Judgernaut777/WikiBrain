@@ -21,6 +21,11 @@ DEFAULTS = {
     "timeout": 180,         # seconds per model call
     "temperature": 0.2,
     "retries": 1,           # re-ask attempts when output fails the contract
+    # Output token cap per call. Sent as max_tokens; 0/None omits it (server
+    # default). Reasoning models (e.g. Ornith) spend tokens on a <think> preamble
+    # before the JSON, so they need generous headroom — keep this >= ~2048 for
+    # those, or they truncate before emitting the answer.
+    "max_tokens": 4096,
 }
 
 # Tasks the router knows about today. `extract` is implemented; the others are

@@ -144,6 +144,26 @@ synthesize = "deepseek/deepseek-chat"   # page prose + skill drafts
 the key env var is set, and a live **reachability** check — run it first if a
 pass fails.
 
+**Local gateway (llama-swap / LiteLLM / a router).** If you run several GGUF
+models behind an OpenAI-compatible gateway, point `base_url` at it and route each
+task to a different friendly name:
+```toml
+[librarian]
+base_url = "http://127.0.0.1:4000/v1"       # a LiteLLM/llama-swap gateway
+model    = "qwen2.5-coder-14b"
+[librarian.models]
+extract    = "qwen2.5-coder-14b"            # reliable structured-JSON extraction
+triage     = "ornith-1.0-9b"                # fast per-claim reasoning
+adjudicate = "ornith-1.0-35b"               # hardest judgement, lowest volume
+synthesize = "ornith-1.0-35b"               # prose + skill drafts
+```
+**Reasoning models** (Ornith, DeepSeek-R1, QwQ, …) work out of the box: the
+librarian sends a generous `max_tokens` (config, default 4096 — raise it if a
+model thinks a lot) so they don't truncate before the JSON, and it strips the
+`<think>…</think>` preamble from the reply automatically. If your gateway has a
+`model = "auto"` router, set that as the top-level `model` and drop the per-task
+table to let it classify.
+
 ## Design boundaries
 - The `wiki` CLI contains **zero model calls** (a billing + determinism
   boundary). All judgment happens inside your agent/model session (the

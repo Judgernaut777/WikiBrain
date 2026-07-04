@@ -8,6 +8,7 @@ environment. Transport is a module function so tests can stub it offline.
 from __future__ import annotations
 
 import json
+import re
 import urllib.error
 import urllib.request
 
@@ -78,6 +79,9 @@ def chat(cfg: LibrarianConfig, task: str, messages: list[dict],
         "messages": messages,
         "temperature": cfg.get("temperature"),
     }
+    max_tokens = cfg.get("max_tokens")
+    if max_tokens:  # 0/None -> omit, let the server decide
+        payload["max_tokens"] = int(max_tokens)
     timeout = int(cfg.get("timeout"))
     if json_object:
         try:
@@ -92,11 +96,23 @@ def chat(cfg: LibrarianConfig, task: str, messages: list[dict],
     return _content(data)
 
 
+# Reasoning models (Ornith, DeepSeek-R1, QwQ, …) emit a chain-of-thought preamble
+# inline in the content before the answer. Strip the common wrappers so the
+# downstream JSON parsers see the answer, not braces buried in the thinking.
+_REASONING = re.compile(r"<(think|thinking|reasoning)>.*?</\1>", re.S | re.I)
+
+
+def strip_reasoning(text: str) -> str:
+    return _REASONING.sub("", text).strip()
+
+
 def _content(data: dict) -> str:
     try:
         content = data["choices"][0]["message"]["content"]
     except (KeyError, IndexError, TypeError) as e:
         raise ModelCallError(f"malformed completion response: {json.dumps(data)[:300]}") from e
+    if isinstance(content, str):
+        content = strip_reasoning(content)
     if not isinstance(content, str) or not content.strip():
         raise ModelCallError("model returned empty content")
     return content
