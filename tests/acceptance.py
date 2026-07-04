@@ -1875,6 +1875,157 @@ def main():
     check("forced dump.sql picked up the new claim",
           "forced-dump claim" in forced_text)
 
+    # ---------------- Librarian maintain (the keystone one-command cycle) -----
+    print("[librarian-maintain] one command chains every advisory pass + "
+          "pure-code housekeeping; preserves all human gates")
+    from librarian import maintain as libmaintain
+
+    mt = make_repo(Path(tempfile.mkdtemp(prefix="wikibrain-mt-")))
+    write(mt / "config.toml", (mt / "config.toml").read_text(encoding="utf-8")
+          + '[librarian]\nmodel = "stub"\nbase_url = "http://stub/v1"\n')
+    mcfg = _LibCfg.load(start=mt)
+
+    # Seed a brain with work for every stage:
+    #  - a pending NEW source            -> catch-up extracts it
+    #  - a promoted 5-claim Redis cluster -> synthesize page + skill draft
+    #  - an open contradiction + escalation -> adjudicate proposals
+    #  - a pending low-confidence claim  -> triage recommendation
+    with Repo.open(start=mt) as r:
+        mt_new_sid = ingest.capture(r, "m", "a fresh note about HTTP caching")
+        rsid = ingest.capture(r, "m", "redis notes")
+        ingest.file_claims_data(r, rsid, {
+            "source_id": rsid, "summary": "s",
+            "claims": [{"text": f"Redis fact number {i}.", "confidence": 0.99,
+                        "entities": ["Redis"]} for i in range(1, 6)],
+            "low_confidence": False})
+        gatemod.gate(r)
+        rpend = [row["id"] for row in r.q(
+            "SELECT id FROM claims WHERE source_id=? AND status='pending'", (rsid,))]
+        if rpend:
+            review.promote(r, rpend)
+        # an open contradiction + escalation for adjudicate
+        rclaim = r.one("SELECT id FROM claims WHERE source_id=? LIMIT 1", (rsid,))["id"]
+        r.ex("INSERT INTO contradictions(claim_a, claim_b, status) VALUES (?,?, 'open')",
+             (rclaim, rclaim))
+        r.ex("INSERT INTO escalations(source_id, reason, status) VALUES (?,?, 'open')",
+             (rsid, "extractor returned low-confidence garble"))
+        # a pending low-confidence claim for triage
+        psid = ingest.capture(r, "m", "a speculative candidate")
+        ingest.file_claims_data(r, psid, {
+            "source_id": psid, "summary": "s",
+            "claims": [{"text": "Widget Z will ship in 2099.", "confidence": 0.5,
+                        "entities": ["Widget Z"]}], "low_confidence": False})
+        gatemod.gate(r)
+        mt_pend_id = r.one("SELECT id FROM claims WHERE source_id=?", (psid,))["id"]
+        r.conn.commit()
+        mt_con_id = r.one("SELECT id FROM contradictions WHERE status='open' ORDER BY id")["id"]
+        mt_esc_id = r.one("SELECT id FROM escalations WHERE status='open' ORDER BY id")["id"]
+
+    mt_extract = {
+        "source_id": mt_new_sid, "summary": "HTTP caching note.",
+        "claims": [{"text": "HTTP caching reuses responses to cut server load.",
+                    "confidence": 0.9, "entities": ["HTTP caching"]}],
+        "low_confidence": False}
+    mt_triage = {"recommendation": "hold", "confidence": 0.4,
+                 "reason": "Speculative far-future date; leave for the human."}
+    mt_adj = {"proposal": "Keep the better-sourced claim; a human should confirm.",
+              "confidence": 0.6}
+    mt_synth = {"prose": "Redis is an in-memory data store used as a cache."}
+    mt_skill = {"should_draft": True, "name": "redis",
+                "description": "Activate when working with Redis caching.",
+                "body": "# Redis\n\nUse Redis as an in-memory cache."}
+
+    def _m_stub(url, payload, headers, timeout):
+        text = " ".join(m["content"] for m in payload["messages"])
+        if "should_draft" in text:
+            reply = mt_skill
+        elif '"prose"' in text:
+            reply = mt_synth
+        elif '"recommendation"' in text:
+            reply = mt_triage
+        elif '"proposal"' in text:
+            reply = mt_adj
+        else:
+            reply = mt_extract
+        return {"choices": [{"message": {"content": json.dumps(reply)}}]}
+
+    _m_orig = libclient._post_json
+    _reach_orig = libclient.reachable
+    libclient._post_json = _m_stub
+    libclient.reachable = lambda cfg, **k: True
+    try:
+        with Repo.open(start=mt) as r:
+            mrep = libmaintain.run(r, mcfg)
+        check("maintain preflight recorded the base_url + model",
+              mrep["preflight"]["base_url"] == "http://stub/v1"
+              and mrep["preflight"]["model"] == "stub")
+        check("maintain ran every stage in order",
+              mrep["stages_run"] == ["catch_up", "triage", "adjudicate",
+                                     "synthesize", "housekeeping"])
+        check("maintain reported no stage errors", not mrep["errors"])
+        s = mrep["summary"]
+        check("maintain summary counts the newly-extracted source",
+              s["sources_extracted"] == 1)
+        check("maintain summary tallies a triage recommendation (hold)",
+              s["triage_recommendations"]["hold"] >= 1)
+        check("maintain summary counts adjudication proposals (contradiction+escalation)",
+              s["proposals_drafted"] == 2)
+        check("maintain summary counts a synthesized page + a skill draft",
+              s["synthesis_pages"] >= 1 and s["skill_drafts"] == 1)
+        check("maintain summary carries the health score from housekeeping",
+              isinstance(s["health_score"], int))
+        check("maintain housekeeping rendered + ran lint/health",
+              mrep["housekeeping"]["digest"].startswith("wiki/digests/")
+              and "health" in mrep["housekeeping"])
+        # gates preserved: it drafts/proposes only, never promotes/resolves/closes/approves
+        with Repo.open(start=mt) as r:
+            pst = r.one("SELECT status FROM claims WHERE id=?", (mt_pend_id,))["status"]
+            cst = r.one("SELECT status, proposal FROM contradictions WHERE id=?", (mt_con_id,))
+            est = r.one("SELECT status, proposal FROM escalations WHERE id=?", (mt_esc_id,))
+            skst = r.one("SELECT status FROM skills WHERE name='redis'")
+        check("maintain NEVER promotes a triaged claim (still pending)", pst == "pending")
+        check("maintain drafts a contradiction proposal but never resolves it",
+              cst["status"] == "open" and bool(cst["proposal"]))
+        check("maintain drafts an escalation proposal but never closes it",
+              est["status"] == "open" and bool(est["proposal"]))
+        check("maintain leaves the drafted skill status='draft' (never approves)",
+              skst is not None and skst["status"] == "draft")
+        check("maintain did not git-commit without --commit", mrep["committed"] is False)
+
+        # stage-skipping honors the flags
+        with Repo.open(start=mt) as r:
+            mrep2 = libmaintain.run(r, mcfg, stages={"triage", "adjudicate"})
+        check("maintain --no-synthesize skips the synthesize stage",
+              mrep2["synthesize"] is None and "synthesize" in mrep2["stages_skipped"])
+        check("maintain still runs catch-up + housekeeping when stages are skipped",
+              "catch_up" in mrep2["stages_run"] and "housekeeping" in mrep2["stages_run"])
+    finally:
+        libclient._post_json = _m_orig
+        libclient.reachable = _reach_orig
+
+    # Preflight fails fast (before any model call) when the endpoint is unreachable.
+    mt_calls = {"n": 0}
+    def _m_count(url, payload, headers, timeout):
+        mt_calls["n"] += 1
+        return {"choices": [{"message": {"content": "{}"}}]}
+    libclient._post_json = _m_count
+    libclient.reachable = lambda cfg, **k: False
+    try:
+        pf_err = None
+        try:
+            with Repo.open(start=mt) as r:
+                libmaintain.run(r, mcfg)
+        except libmaintain.PreflightError as e:
+            pf_err = str(e)
+        check("maintain preflight raises PreflightError when endpoint unreachable",
+              pf_err is not None)
+        check("preflight error names the base_url so the message is actionable",
+              pf_err is not None and "http://stub/v1" in pf_err)
+        check("preflight fails BEFORE any model call is made", mt_calls["n"] == 0)
+    finally:
+        libclient._post_json = _m_orig
+        libclient.reachable = _reach_orig
+
     print(f"\nRESULT: {PASS} passed, {FAIL} failed")
     sys.exit(1 if FAIL else 0)
 

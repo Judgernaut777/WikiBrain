@@ -38,6 +38,27 @@ def _post_json(url: str, payload: dict, headers: dict, timeout: int) -> dict:
         raise ModelCallError(f"model endpoint unreachable ({url}): {e}") from e
 
 
+def reachable(cfg: LibrarianConfig, *, timeout: int = 5) -> bool:
+    """Cheap liveness probe against the configured base_url. Returns True if the
+    host answers at all — any HTTP response (even 404) means something is
+    listening — and False on a connection/timeout error. Used by the maintain
+    preflight so a down endpoint fails fast instead of mid-run. No model call."""
+    url = str(cfg.get("base_url")).rstrip("/")
+    headers = {"User-Agent": UA}
+    key = cfg.api_key()
+    if key:
+        headers["Authorization"] = f"Bearer {key}"
+    req = urllib.request.Request(url, headers=headers, method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            resp.read(0)
+        return True
+    except urllib.error.HTTPError:
+        return True  # the host answered; we only care that it is up
+    except Exception:
+        return False
+
+
 def chat(cfg: LibrarianConfig, task: str, messages: list[dict],
          *, json_object: bool = True) -> str:
     """One chat completion for `task`; returns the assistant message content.

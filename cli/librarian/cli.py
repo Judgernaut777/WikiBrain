@@ -13,6 +13,7 @@ from wiki.db import Repo
 
 from . import adjudicate as adjudicatemod
 from . import extract as extractmod
+from . import maintain as maintainmod
 from . import synthesize as synthesizemod
 from . import triage as triagemod
 from . import watch as watchmod
@@ -133,6 +134,47 @@ def cmd_synthesize(args):
               "(`wiki skill approve`); the librarian never approves or installs.")
 
 
+def cmd_maintain(args):
+    cfg = LibrarianConfig.load()
+    stages = set(maintainmod.STAGES)
+    if args.no_triage:
+        stages.discard("triage")
+    if args.no_adjudicate:
+        stages.discard("adjudicate")
+    if args.no_synthesize:
+        stages.discard("synthesize")
+    with Repo.open() as repo:
+        try:
+            rep = maintainmod.run(repo, cfg, stages=stages, commit=args.commit)
+        except maintainmod.PreflightError as e:
+            sys.exit(f"error: {e}")
+        if _emit(rep, args.json):
+            return
+        s = rep["summary"]
+        print("maintain complete.")
+        print(f"  extracted:   {s['sources_extracted']} source(s)"
+              + (f", {s['sources_failed']} failed" if s["sources_failed"] else ""))
+        print(f"  gate:        auto-promoted {s['gate_promoted']}, held {s['gate_held']}")
+        recs = s["triage_recommendations"]
+        print(f"  triage:      promote {recs['promote']}, reject {recs['reject']}, "
+              f"hold {recs['hold']}")
+        print(f"  proposals:   {s['proposals_drafted']} drafted")
+        print(f"  synthesis:   {s['synthesis_pages']} page(s), "
+              f"{s['skill_drafts']} skill draft(s)")
+        print(f"  health:      score {s['health_score']} (lower is better)")
+        for name in rep["stages_skipped"]:
+            print(f"  (skipped {name})")
+        for err in rep["errors"]:
+            print(f"  ! stage {err['stage']} failed: {err['error']}")
+        if rep["committed"]:
+            print("  committed:   yes (git commit created)")
+        print("\nWhat needs YOU (human gates — the librarian only drafts/proposes):")
+        print("  * review + promote/reject held claims:   wiki triage")
+        print("  * resolve contradictions / close escalations:   "
+              "wiki contradiction list, wiki escalation list")
+        print("  * approve skill drafts:   wiki skill list --status draft")
+
+
 def cmd_watch(args):
     rep = watchmod.run(interval=args.interval, once=args.once)
     if _emit(rep, args.json):
@@ -211,6 +253,21 @@ def build_parser() -> argparse.ArgumentParser:
                     help="include skill drafting (part 2); --no-skills to skip it")
     addj(sy)
     sy.set_defaults(func=cmd_synthesize)
+
+    sm = sub.add_parser(
+        "maintain",
+        help="run the whole judgment cycle in one command: catch-up -> triage -> "
+             "adjudicate -> synthesize, then render/digest/lint/health (advisory "
+             "only; never promotes/resolves/approves)")
+    sm.add_argument("--no-triage", action="store_true", help="skip the triage stage")
+    sm.add_argument("--no-adjudicate", action="store_true",
+                    help="skip the adjudicate stage")
+    sm.add_argument("--no-synthesize", action="store_true",
+                    help="skip the synthesize stage")
+    sm.add_argument("--commit", action="store_true",
+                    help="git-commit at the end (default off — git is your call)")
+    addj(sm)
+    sm.set_defaults(func=cmd_maintain)
 
     sw = sub.add_parser("watch",
                         help="watch the drop folder + bookmark files; ingest and "
