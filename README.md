@@ -193,6 +193,24 @@ The model is still *required* to finish a pass — this is a hybrid, not a full
 offline fallback — but the deterministic pre-filter and constrained decoding are
 what let that model be small, local, and free.
 
+**Measured on real hardware** (Minisforum MS-R1 — CIX P1, 12-core Armv9 CPU, 62 GB,
+no GPU; `llama.cpp` built with `-march=armv9-a+i8mm+dotprod+bf16`):
+
+| Model (Q4_K_M) | RAM | Generation | Notes |
+|---|---|---|---|
+| Qwen3-4B | 2.3 GB | ~10–14 tok/s | high-volume extract/triage |
+| Qwen3-30B-A3B (MoE) | 17 GB | **~11–16 tok/s** | *faster* than the 4B — reads only ~3B active experts/token |
+
+A full extraction (5 claims from a short source, grammar-constrained JSON) ran
+end-to-end in ~75 s; determinized triage skips the model entirely on the clear
+cases. Two things mattered on this Arm box: (1) build `llama.cpp` with an explicit
+`-march` — `-mcpu=native` on an older gcc silently drops the i8mm int8 kernels and
+halves prefill; (2) if your model is a hybrid reasoner (Qwen3), serve it with
+thinking **off** (`llama-server --reasoning off`) so structured passes emit JSON
+immediately instead of burning CPU seconds on a `<think>` preamble. The MoE
+generating *faster* than the 4B is the headline: on a high-RAM CPU box, the
+small-active MoE is the best single model for the whole pipeline.
+
 **A separate inference box (agents here, models there).** The librarian treats
 inference as a plain remote API, so you can run it on one machine and your models
 on another. Point `base_url` at the other box's OpenAI-compatible gateway
