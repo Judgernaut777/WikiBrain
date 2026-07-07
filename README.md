@@ -5,45 +5,44 @@
 ![Python](https://img.shields.io/badge/python-3.11%2B-blue.svg)
 ![Model calls in CLI: zero](https://img.shields.io/badge/CLI%20model%20calls-zero-success.svg)
 
-A personal, compounding, **agent-native** knowledge base. One SQLite database is
-the source of truth; everything else is a regenerable projection of it, rebuilt by
-pure code and never hand-edited:
+**Long-term memory for your AI agents — that you can read and edit like a wiki.**
+
+Your agents remember things by writing facts into wiki-brain and recalling them
+later. **You stay the editor:** nothing an agent writes becomes *trusted* memory
+until you approve it. It's one SQLite database (the single source of truth) that
+your agents reach over **MCP**, and that you browse and audit as a generated
+**Obsidian wiki**. It runs entirely on your own hardware — **no API keys, no
+cloud, no bill.**
 
 ```mermaid
 flowchart LR
-    raw["raw sources"] --> db[("SQLite DB<br/>claims + context graph = truth")] --> wiki["Obsidian wiki<br/>(generated view)"]
+    agents["your agents"] -->|"capture (MCP)"| db[("SQLite DB<br/>the trusted memory")]
+    db -->|"recall (MCP)"| agents
+    db -->|"generated view"| wiki["Obsidian wiki<br/>you browse + audit"]
+    you(["you"]) -->|"promote / reject"| db
 ```
 
-**Key-free by default.** The CLI does pure-code structure (ingest, render, search,
-budgeted fetch) with **zero billable LLM calls and no API keys** — judgment lives
-in your agent/model sessions, which read content and emit structured claims. An
-optional *premium research tier* (Firecrawl / mcp-omnisearch) can be layered in at
-the session level, with its keys held outside this repo, so the project itself
-stays secret-free (`wiki lint` enforces it).
+Two rules make it trustworthy:
 
-```mermaid
-flowchart TB
-    src["bookmarks · web pages<br/>PDFs / images · session captures"]
-    src -->|"one door<br/>wiki add · capture · drop · transcribe"| raw[("raw/")]
-    raw -->|"model judgment — your agent session<br/>cheap model nightly · stronger model for maintain"| db[("SQLite DB<br/>claims + entities + context = truth")]
-    db -->|"wiki render (pure code)"| wiki["wiki/<br/>generated Obsidian vault — never hand-edit"]
-    db -->|"wiki skill render"| skills["agent skills<br/>(.claude/skills/)"]
-    db -->|"wiki mcp serve"| mcp["MCP tools<br/>any client reads"]
-```
+- **Agents can only propose, never decide.** Everything captured — by an agent or
+  by you — lands *pending*. It becomes trusted memory only when you promote it.
+  That gate is what makes it safe to let agents write to your memory at all.
+- **The `wiki` tool never calls a model.** All the plumbing — storing, generating
+  the wiki, searching — is plain, deterministic code with zero API calls. Only a
+  separate **librarian** process uses a model, and only to read raw sources and
+  *draft* candidate facts for you to review.
 
-Knowledge is compiled once at ingest and maintained, never re-derived per query.
-The database projects **three ways** — the **Obsidian wiki** to browse, **agent
-skills** authored from promoted truth, and an **MCP server** any agent can query —
-each rebuilt from the DB, so humans and models change the DB, never the outputs.
-Provenance is rigorous: every source artifact is hash-verified, and nothing
-becomes truth except through a human-gated promotion. See **BUILD_SPEC.md** for the
-full design and **SCHEMA.md** for conventions.
+Every fact traces back to its source, and wiki-brain flags when a new fact
+contradicts one you already trust. See **BUILD_SPEC.md** for the full design and
+**SCHEMA.md** for conventions.
 
-## Quickstart (~5 minutes)
-The fastest path: the `wiki` CLI captures sources; the **librarian**
-(`wiki-librarian`, a separate process) does the model judgment against a local,
-key-free model; you open the result in Obsidian. The librarian only ever
-**drafts and proposes** — you keep the promote/resolve/approve gates.
+---
+
+## Use it in 5 minutes
+The loop is: **stand it up → capture sources → let the librarian draft facts →
+you approve → your agents recall.** The `wiki` command is the tool; the
+**librarian** (`wiki-librarian`, a separate process) is the only part that uses a
+model, and it only ever **drafts and proposes** — you keep the promote/approve gates.
 
 **1. Install the CLI** (installs both `wiki` and `wiki-librarian`):
 ```powershell
@@ -100,8 +99,20 @@ wiki promote 14 19 ; wiki reject 22          # you decide — the gate is yours
 wiki render                                  # rebuild pages from the DB
 ```
 Open the `wiki/` folder as an **Obsidian vault** to browse (graph view works via
-`[[wikilinks]]`). That's the loop: capture → `wiki-librarian maintain` → act on
-the gates → browse. Everything below is depth on each piece.
+`[[wikilinks]]`).
+
+**7. Connect your agents (this is the point).** Expose the brain over MCP so any
+agent/harness can **recall** the facts you've trusted and **capture** new ones
+(which land pending, behind the same gate):
+```bash
+wiki mcp info               # prints the client-config JSON to paste into your harness
+wiki mcp serve              # the stdio server your MCP client launches
+wiki mcp serve --read-only  # recall only — omit the brain_capture write tool
+```
+Your agents now call `brain_recall` (a context pack of trusted facts) and
+`brain_capture` (a proposed fact for you to review). That's the whole loop:
+**agents capture → the librarian drafts → you approve → agents recall.** Everything
+below is depth on each piece.
 
 > **The full librarian surface:** `extract` (one source), `catch-up` (drain the
 > backlog), `triage`, `adjudicate`, `synthesize`, `maintain` (all of them at
@@ -475,7 +486,7 @@ health) — with a **preflight** that fails fast (naming `base_url`) if no model
 reachable, and one bad stage never aborting the rest. It prints a "what needs
 YOU" gate checklist at the end. Skip stages with `--no-triage`/`--no-adjudicate`/
 `--no-synthesize`; add `--commit` to git-commit at the end (off by default — git
-stays your call). This is the primary path in the [Quickstart](#quickstart-5-minutes).
+stays your call). This is the primary path in [Use it in 5 minutes](#use-it-in-5-minutes).
 
 > The librarian is the model-bearing half by design. The original key-free,
 > subscription-only posture (below) is still fully supported — point the
