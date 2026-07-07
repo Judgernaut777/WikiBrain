@@ -7,6 +7,8 @@
 
 <!-- Suggested GitHub topics (set in the repo's About panel): mcp · ai-agents · agent-memory · knowledge-base · obsidian · sqlite · local-first · llm -->
 
+> **Part of the [Fascia](https://github.com/Judgernaut777/fascia) ecosystem** — the **memory** layer. Fascia connects this with the **control plane** ([mcp-agentconnect](https://github.com/Judgernaut777/mcp-agentconnect)) and a multi-harness subagent fabric into one self-hosted, privacy-first agent stack.
+
 **Long-term memory for your AI agents — that you can read and edit like a wiki.**
 
 Your agents remember things by writing facts into wiki-brain and recalling them
