@@ -21,6 +21,29 @@ bookmark_folder = "wiki"        # only sync bookmarks under this browser folder
 # to ingest. Created on first use.
 drop_folder = "~/wiki-brain-drop"
 
+# Additional ingestion folders. Each [[paths.sources]] is a folder that `wiki
+# drop` and the librarian's `watch` loop pull files from — so info flows in from
+# wherever it already lives, not just one dedicated inbox. `path` is required;
+# everything else has a safe default. Files are NEVER moved by default
+# (move = false): global content-hash dedup makes re-scanning the same folder
+# harmless, so it's safe to point at real directories you also use elsewhere.
+# The `drop_folder` above behaves as an implicit source with move = true,
+# origin = "drop", recursive = false.
+#
+# [[paths.sources]]
+# path      = "~/Documents/papers"
+# origin    = "papers"     # provenance tag on each ingested source (default "drop").
+#                          # AVOID the reserved tags clip / transcript / session/* /
+#                          # autoresearch — they carry special downstream meaning.
+# recursive = true         # descend into subfolders (default false)
+# include   = ["*.pdf"]    # only files matching these globs (default: all files)
+# move      = false        # true = archive originals to <folder>/.processed/ after ingest
+#
+# [[paths.sources]]
+# path    = "~/notes"
+# origin  = "notes"
+# include = ["*.md", "*.txt"]
+
 [gate]
 auto_promote_confidence = 0.85  # claims at/above this may auto-promote
 machine_confidence_ceiling = 0.9  # cap on machine-origin claim confidence

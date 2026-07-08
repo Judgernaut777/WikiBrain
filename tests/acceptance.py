@@ -260,6 +260,71 @@ def main():
     check("drop re-run is idempotent (nothing new ingested)",
           not any(e["source_id"] for e in dres2))
 
+    # ---------------- Multiple ingestion folders ----------------
+    print("[drop] multiple configurable ingestion folders")
+    from librarian import watch as libwatch
+    mtmp = Path(tempfile.mkdtemp(prefix="wikibrain-msrc-"))
+    mroot = make_repo(mtmp)
+    fa = mtmp / "papers"; (fa / "sub").mkdir(parents=True)
+    fb = mtmp / "notes"; fb.mkdir()
+    write(fa / "a.txt", "Papers fact: transformers scale with data.")
+    write(fa / "sub" / "nested.txt", "Nested fact: attention is quadratic.")
+    write(fa / "skip.md", "# excluded by the include filter")
+    write(fb / "b.txt", "Notes fact: write it down or lose it.")
+    src_specs = [
+        {"path": str(fa), "origin": "papers", "recursive": True,
+         "include": ["*.txt"], "move": False},
+        {"path": str(fb), "origin": "notes"},   # defaults: flat, all files, move=false
+    ]
+    with Repo.open(start=mroot) as r:
+        r.cfg.data["paths"]["drop_folder"] = ""   # isolate: only our explicit sources
+        r.cfg.data["paths"]["sources"] = src_specs
+        mres = dropmod.scan(r)
+        origins = {row["title"]: row["origin"]
+                   for row in r.q("SELECT title, origin FROM sources")}
+    mfiles = {e["file"]: e for e in mres if e["source_id"]}
+    check("multi-source: both folders ingested", "a.txt" in mfiles and "b.txt" in mfiles)
+    check("multi-source: per-folder origin recorded on the source row",
+          origins.get("a") == "papers" and origins.get("b") == "notes")
+    check("multi-source: recursive source picks up a nested file",
+          "nested.txt" in mfiles and mfiles["nested.txt"]["origin"] == "papers")
+    check("multi-source: include glob excludes non-matching files",
+          "skip.md" not in mfiles and (fa / "skip.md").exists())
+    check("multi-source: move=false leaves originals in place (no .processed/)",
+          (fa / "a.txt").exists() and (fb / "b.txt").exists()
+          and not (fa / ".processed").exists() and not (fb / ".processed").exists())
+    with Repo.open(start=mroot) as r:
+        r.cfg.data["paths"]["drop_folder"] = ""
+        r.cfg.data["paths"]["sources"] = src_specs
+        mres2 = dropmod.scan(r)
+        sig = libwatch._signature(r.cfg)
+        wdirs = dict(libwatch._watched_dirs(r.cfg))
+    check("multi-source: re-scan across folders is idempotent",
+          not any(e["source_id"] for e in mres2))
+    check("watch: signature fingerprints files across all sources (recursive+filter)",
+          any(k.endswith("a.txt") for k in sig)
+          and any(k.endswith("nested.txt") for k in sig)
+          and any(k.endswith("b.txt") for k in sig)
+          and not any("skip.md" in k for k in sig))
+    check("watch: schedules each source dir with its recursive flag",
+          wdirs.get(fa.resolve()) is True and wdirs.get(fb.resolve()) is False)
+
+    # non-recursive control + global --no-move override (move=true source, scan(move=False))
+    ctmp = Path(tempfile.mkdtemp(prefix="wikibrain-msrc2-"))
+    croot = make_repo(ctmp)
+    fc = ctmp / "flat"; (fc / "deep").mkdir(parents=True)
+    write(fc / "top.txt", "Top-level fact worth keeping.")
+    write(fc / "deep" / "buried.txt", "Buried fact the non-recursive scan must miss.")
+    with Repo.open(start=croot) as r:
+        r.cfg.data["paths"]["drop_folder"] = ""
+        r.cfg.data["paths"]["sources"] = [{"path": str(fc), "origin": "flat", "move": True}]
+        cres = dropmod.scan(r, move=False)   # global override beats the source's move=true
+    cfiles = {e["file"]: e for e in cres if e["source_id"]}
+    check("multi-source: non-recursive source ignores nested files",
+          "top.txt" in cfiles and "buried.txt" not in cfiles)
+    check("multi-source: scan(move=False) global override leaves a move=true source's files",
+          (fc / "top.txt").exists() and not (fc / ".processed").exists())
+
     # ---------------- Daily digest ----------------
     print("[digest] daily learning digest")
     gtmp = Path(tempfile.mkdtemp(prefix="wikibrain-digest-"))

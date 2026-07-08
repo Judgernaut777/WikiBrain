@@ -17,6 +17,7 @@ DEFAULTS = {
         "bookmarks": [],
         "bookmark_folder": "wiki",
         "drop_folder": "~/wiki-brain-drop",
+        "sources": [],          # [[paths.sources]] — extra ingestion folders (see IngestSource)
     },
     "gate": {
         "auto_promote_confidence": 0.85,
@@ -78,6 +79,24 @@ def find_repo_root(start: Path | None = None) -> tuple[Path, bool]:
     return cur, False
 
 
+@dataclass(frozen=True)
+class IngestSource:
+    """One configured ingestion folder: where to scan and how to treat it.
+
+    `include` is a tuple of fnmatch globs (empty = all files). `move=True`
+    archives originals to <folder>/.processed/ after ingest; the default False
+    leaves the user's files untouched — global content-hash dedup
+    (`sources.hash`) makes re-scanning the same folder harmless. `origin` tags
+    provenance on each ingested source (avoid the reserved values 'clip',
+    'transcript', 'session/*', 'autoresearch', which carry special downstream
+    meaning)."""
+    path: Path
+    origin: str = "drop"
+    recursive: bool = False
+    include: tuple[str, ...] = ()
+    move: bool = False
+
+
 @dataclass
 class Config:
     root: Path
@@ -108,6 +127,40 @@ class Config:
     def drop_folder(self) -> Path | None:
         raw = self.data["paths"].get("drop_folder")
         return Path(os.path.expanduser(raw)).resolve() if raw else None
+
+    @property
+    def ingest_sources(self) -> list[IngestSource]:
+        """Every configured ingestion folder as a normalized IngestSource.
+
+        Each `[[paths.sources]]` entry (expanduser + resolve, dedup by path,
+        entries lacking `path` skipped), plus the legacy single `drop_folder`
+        synthesized as an implicit source (origin 'drop', archives originals) —
+        appended only when its path isn't already listed explicitly, so an
+        explicit entry for that path wins."""
+        out: list[IngestSource] = []
+        seen: set[Path] = set()
+        for e in self.data["paths"].get("sources", []):
+            raw = e.get("path") if isinstance(e, dict) else None
+            if not raw:
+                continue
+            p = Path(os.path.expanduser(raw)).resolve()
+            if p in seen:
+                continue
+            seen.add(p)
+            out.append(IngestSource(
+                path=p,
+                origin=e.get("origin") or "drop",
+                recursive=bool(e.get("recursive", False)),
+                include=tuple(e.get("include") or ()),
+                move=bool(e.get("move", False)),
+            ))
+        legacy = self.data["paths"].get("drop_folder")
+        if legacy:
+            lp = Path(os.path.expanduser(legacy)).resolve()
+            if lp not in seen:
+                out.append(IngestSource(path=lp, origin="drop", recursive=False,
+                                        include=(), move=True))
+        return out
 
     @property
     def bookmark_folder(self) -> str:

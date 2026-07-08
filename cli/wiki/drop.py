@@ -1,31 +1,67 @@
-"""`wiki drop`: ingest files a user drops into a watch folder.
+"""`wiki drop`: ingest files from the configured ingestion folders.
 
-Globs config `[paths].drop_folder`, converts each file to a markdown `raw/`
-artifact via `extract.to_markdown`, and registers it as a pending source
-(origin "drop", with `mime_type`). On success the original is archived to
-`<drop>/.processed/` so re-runs are idempotent. Files whose extractor/extra
-isn't installed are left in place (with a warning) for a later run. Pure code,
-ZERO model calls — the dropped content is read and turned into claims later, by
-a Claude session.
+Scans every `[[paths.sources]]` folder (plus the legacy single `drop_folder`),
+converts each file to a markdown `raw/` artifact via `extract.to_markdown`, and
+registers it as a pending source (per-folder `origin`, with `mime_type`). By
+default originals are LEFT IN PLACE — global content-hash dedup (`sources.hash`)
+makes re-scanning harmless; a source with `move=true` (and the legacy
+`drop_folder`) archives the original to `<folder>/.processed/` instead. Files
+whose extractor/extra isn't installed are left in place (with a warning) for a
+later run. Pure code, ZERO model calls — the dropped content is read and turned
+into claims later, by the librarian or a Claude session.
 """
 from __future__ import annotations
 
+import fnmatch
+import os
 import shutil
+from collections.abc import Iterator
 from pathlib import Path
 
 from .db import Repo
+from .config import IngestSource
 from . import ingest, extract, util
 
 PROCESSED = ".processed"
 
 
-def scan(repo: Repo, *, move: bool = True) -> list[dict]:
-    """Process every file in the drop folder. Returns one result dict per file:
-    {file, kind, mime_type, source_id|None, warning|None}."""
-    folder = repo.cfg.drop_folder
+def _included(name: str, include: tuple[str, ...]) -> bool:
+    """True if `name` passes the source's include globs (empty = all files)."""
+    return not include or any(fnmatch.fnmatch(name, g) for g in include)
+
+
+def iter_source_files(src: IngestSource) -> Iterator[Path]:
+    """Yield the files to ingest from one source, honoring `recursive` and the
+    `include` globs. Skips `.processed/` and hidden dirs, and never follows
+    symlinks (no infinite loops). Shared with the watcher so what it fingerprints
+    and what `scan` ingests can't drift."""
+    folder = src.path
+    if not folder.exists():
+        return
+    if src.recursive:
+        for dirpath, dirnames, filenames in os.walk(folder, followlinks=False):
+            dirnames[:] = sorted(d for d in dirnames
+                                 if d != PROCESSED and not d.startswith("."))
+            for name in sorted(filenames):
+                if _included(name, src.include):
+                    yield Path(dirpath) / name
+    else:
+        for p in sorted(folder.iterdir()):
+            if p.is_dir():  # skip subdirs, including .processed/
+                continue
+            if _included(p.name, src.include):
+                yield p
+
+
+def _scan_folder(repo: Repo, src: IngestSource, *,
+                 move_override: bool | None = None) -> list[dict]:
+    """Ingest one source folder. Returns one result dict per file:
+    {file, source, origin, kind, mime_type, source_id|None, warning|None}."""
+    folder = src.path
     results: list[dict] = []
-    if not folder or not folder.exists():
+    if not folder.exists():
         return results
+    move = src.move if move_override is None else move_override
     processed_dir = folder / PROCESSED
     tess = repo.cfg.extract_cfg("tesseract_cmd") or None
     assets = repo.root / "raw" / "assets"
@@ -40,13 +76,11 @@ def scan(repo: Repo, *, move: bool = True) -> list[dict]:
             target = processed_dir / f"{path.stem}{suffix}{path.suffix}"
         shutil.move(str(path), str(target))
 
-    for path in sorted(folder.iterdir()):
-        if path.is_dir():
-            continue  # skip subdirs, including .processed
+    for path in iter_source_files(src):
         kind = extract.kind_for(path)
         mime = extract.mime_for(path)
-        entry = {"file": path.name, "kind": kind, "mime_type": mime,
-                 "source_id": None, "warning": None}
+        entry = {"file": path.name, "source": str(src.path), "origin": src.origin,
+                 "kind": kind, "mime_type": mime, "source_id": None, "warning": None}
         try:
             md = extract.to_markdown(path, kind=kind, tesseract_cmd=tess)
         except extract.ExtractError as e:
@@ -72,17 +106,29 @@ def scan(repo: Repo, *, move: bool = True) -> list[dict]:
         try:
             sid = ingest._register_source(
                 repo, content=content, rel_path=repo.rel(dest), title=path.stem,
-                url=None, origin="drop", fetched_at=None, mime_type=mime)
+                url=None, origin=src.origin, fetched_at=None, mime_type=mime)
         except ingest.IngestError as e:
             entry["warning"] = str(e)  # exact duplicate -> already known
-            _archive(path, h8)         # still get it out of the inbox
+            _archive(path, h8)         # still get it out of the inbox (if move)
             results.append(entry)
             continue
         entry["source_id"] = sid
         _archive(path, h8)
         results.append(entry)
+    return results
 
+
+def scan(repo: Repo, *, move: bool | None = None) -> list[dict]:
+    """Process every configured ingestion folder (`[[paths.sources]]` + the
+    legacy `drop_folder`). `move=None` (default) lets each source use its own
+    `move` setting; `move=False`/`True` overrides all of them (the `--no-move`
+    flag passes False, so it means "don't touch my files this run"). Returns one
+    result dict per file across all folders."""
+    results: list[dict] = []
+    for src in repo.cfg.ingest_sources:
+        results += _scan_folder(repo, src, move_override=move)
     ingested = [e for e in results if e["source_id"]]
     if ingested:
-        repo.finalize("drop", f"ingested {len(ingested)} file(s) from drop folder")
+        n_src = len({e["source"] for e in ingested})
+        repo.finalize("drop", f"ingested {len(ingested)} file(s) from {n_src} source(s)")
     return results

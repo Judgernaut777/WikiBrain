@@ -56,20 +56,20 @@ def scan_once(repo: Repo, cfg: LibrarianConfig) -> dict:
 
 
 def _signature(wiki_cfg: Config) -> dict:
-    """Cheap stdlib change fingerprint over the two watched inputs: a map of
-    "drop:<name>" / "bm:<path>" -> (mtime_ns, size). Used by the poll fallback
-    to decide whether a scan is worth doing this tick."""
+    """Cheap stdlib change fingerprint over the watched inputs: a map of
+    "src:<path>" / "bm:<path>" -> (mtime_ns, size). Used by the poll fallback to
+    decide whether a scan is worth doing this tick. Enumerates each configured
+    ingestion source exactly as `drop.scan` does (`iter_source_files` honors
+    recursive + include and skips .processed/hidden), so the watcher fingerprints
+    precisely the files that would be ingested."""
     sig: dict[str, tuple[int, int]] = {}
-    folder = wiki_cfg.drop_folder
-    if folder and folder.exists():
-        for p in sorted(folder.iterdir()):
-            if p.is_dir():  # skip subdirs, including drop's own .processed/
-                continue
+    for src in wiki_cfg.ingest_sources:
+        for p in dropmod.iter_source_files(src):
             try:
                 st = p.stat()
             except OSError:
                 continue
-            sig[f"drop:{p.name}"] = (st.st_mtime_ns, st.st_size)
+            sig[f"src:{p}"] = (st.st_mtime_ns, st.st_size)
     for bm in wiki_cfg.bookmark_files:
         try:
             st = bm.stat()
@@ -79,15 +79,18 @@ def _signature(wiki_cfg: Config) -> dict:
     return sig
 
 
-def _watched_dirs(wiki_cfg: Config) -> set[Path]:
-    dirs: set[Path] = set()
-    folder = wiki_cfg.drop_folder
-    if folder and folder.exists():
-        dirs.add(folder)
+def _watched_dirs(wiki_cfg: Config) -> list[tuple[Path, bool]]:
+    """The directories to observe, each with a recursive flag: every configured
+    ingestion source (recursive per its setting) plus each bookmark file's parent
+    (non-recursive). Deduped preferring recursive=True."""
+    dirs: dict[Path, bool] = {}
+    for src in wiki_cfg.ingest_sources:
+        if src.path.exists():
+            dirs[src.path] = dirs.get(src.path, False) or src.recursive
     for bm in wiki_cfg.bookmark_files:
         if bm.parent.exists():
-            dirs.add(bm.parent)
-    return dirs
+            dirs.setdefault(bm.parent, False)
+    return list(dirs.items())
 
 
 def run(*, interval: int = 5, once: bool = False, start: Path | None = None) -> dict:
@@ -117,8 +120,8 @@ def run(*, interval: int = 5, once: bool = False, start: Path | None = None) -> 
         with Repo.open(start=start) as repo:
             watch_dirs = _watched_dirs(repo.cfg)
         observer = Observer()
-        for d in watch_dirs:
-            observer.schedule(_Handler(), str(d), recursive=False)
+        for d, rec in watch_dirs:
+            observer.schedule(_Handler(), str(d), recursive=rec)
         observer.start()
         try:
             while True:

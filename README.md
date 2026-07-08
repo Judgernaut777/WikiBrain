@@ -364,7 +364,7 @@ Run the CLI any of these ways:
 ## Quick tour
 ```powershell
 .\wiki add https://example.com/article --origin clip   # one door in
-.\wiki drop                                             # ingest files from the drop folder
+.\wiki drop                                             # ingest files from the configured folders
 .\wiki transcribe https://youtu.be/VIDEO_ID            # ingest a video's captions
 .\wiki pending                                          # what needs extraction
 # (your agent produces extraction JSON per the contract in the docs)
@@ -456,6 +456,26 @@ unreachable, sources simply stay `new` until you run it (or a session, or a
 timer, if you want belt-and-suspenders). Per-task model routing lets a cheap
 local model do high-volume extraction while a stronger one is reserved for the
 harder passes — see `[librarian.models]` in `config.example.toml`.
+
+**Ingesting from multiple folders.** Beyond the single drop folder, point the
+brain at any directories you already keep files in — a papers library, a notes
+vault, a downloads inbox — with `[[paths.sources]]` entries in `config.toml`.
+`wiki drop` and the `watch` loop scan every one:
+```toml
+[[paths.sources]]
+path      = "~/Documents/papers"
+origin    = "papers"     # provenance tag on ingested sources (default "drop")
+recursive = true         # descend into subfolders
+include   = ["*.pdf"]    # only these globs (default: all files)
+move      = false        # leave your originals in place (the default)
+```
+Files are **left in place by default** — a global content-hash dedup means
+re-scanning a folder never re-ingests, so it's safe to watch real directories you
+also use elsewhere (only the legacy `drop_folder` archives originals to
+`.processed/`). `recursive` walks subfolders, and `include` scopes a noisy
+directory to just the file types you want — that filter plus the human gate keep
+a big folder from flooding the model. A few origin tags are reserved (`clip`,
+`transcript`, `session/*`, `autoresearch`); pick anything else.
 
 **Triage (advisory).** The auto-gate promotes the easy tier and holds the rest.
 `wiki-librarian triage` adds model judgment on the held claims — a

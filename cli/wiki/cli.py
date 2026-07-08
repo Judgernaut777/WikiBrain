@@ -138,13 +138,13 @@ def cmd_capture(args):
 
 def cmd_drop(args):
     with Repo.open() as repo:
-        results = dropmod.scan(repo, move=not args.no_move)
+        results = dropmod.scan(repo, move=False if args.no_move else None)
     ingested = [r for r in results if r["source_id"]]
     _spawn_librarian(Config.load(), [r["source_id"] for r in ingested])
     if _emit(results, args.json):
         return
     if not results:
-        print("drop folder is empty (or not configured)")
+        print("no ingestion folders configured, or all are empty")
         return
     warned = [r for r in results if r["warning"]]
     print(f"drop: ingested {len(ingested)} file(s)"
