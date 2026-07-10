@@ -1,87 +1,74 @@
-"""fascia-guard integration for the brain's write/read doors (memory-poisoning
-and secret-leak defense).
+"""DEPRECATED. The legacy optional `fascia-guard` seam. Inert.
 
-Respects this module's invariants:
-  * **Soft dependency.** If fascia-guard is not installed, every function is a
-    no-op — the offline acceptance harness (no fascia-guard, no `mcp` SDK) imports
-    and runs the pure handlers unchanged.
-  * **Dormant by default.** Scanning runs only when FASCIA_GUARD (or _ENFORCE) is
-    set, so default behavior and the gate are untouched.
-  * **Zero model calls / offline.** fascia-guard is deterministic and makes no
-    network calls (it scans in a no-network context; secret verification is
-    disabled). Importing it pulls no heavy deps — model backends load lazily and
-    fall back to a pure-regex heuristic.
+Superseded by `wiki.safety`, which is WikiBrain-local, enabled by default, and
+requires no third-party package. Nothing in WikiBrain calls this module any more:
+capture, recall and promotion all go through `wiki.safety.scan_for`.
 
-Enforcement (FASCIA_GUARD_ENFORCE=1):
-  * capture — refuse to store content that carries secret/credential material
-    (the write door already instructs "Do not capture secrets"; this enforces it).
-  * recall — advisory: annotate the context pack when recalled material trips the
-    guard (e.g. an injection payload stored as a pending claim), so the client
-    model is warned. Non-destructive.
+**Two safety pipelines must never both be authoritative.** Rather than define an
+ordering between them, this one is switched off. Every function below is a no-op,
+`available()` and `active()` return False regardless of `FASCIA_GUARD` or
+`FASCIA_GUARD_ENFORCE`, and setting either variable warns instead of silently
+re-enabling a second, weaker gate.
+
+Retained only so an out-of-tree import does not crash. It will be deleted; do not
+add behaviour to it. Configure `[safety]` in config.toml instead — see
+docs/SAFETY.md, which maps each old flag onto its replacement.
 """
 from __future__ import annotations
 
 import os
+import warnings
 
-try:  # soft dependency
-    from fascia_guard.integrations.wikibrain import (
-        guard_before_store,
-        guard_on_recall,
-        has_secret,
-        redact_secret_spans,
-    )
-    _AVAILABLE = True
-except Exception:  # pragma: no cover - only when the package is absent
-    _AVAILABLE = False
+#: The environment variables the old seam honoured. They no longer do anything.
+LEGACY_FLAGS = ("FASCIA_GUARD", "FASCIA_GUARD_ENFORCE")
+
+_REPLACEMENT = (
+    "wiki.safety is now the built-in safety pipeline; it is enabled by default "
+    "and needs no external package. Configure it under [safety] in config.toml. "
+    "See docs/SAFETY.md."
+)
 
 
-def _flag(name: str) -> bool:
-    return os.environ.get(name, "").strip().lower() not in ("", "0", "false", "no")
+def _warn_if_set() -> None:
+    live = [f for f in LEGACY_FLAGS if os.environ.get(f, "").strip()]
+    if live:
+        warnings.warn(
+            f"{'/'.join(live)} is set, but the fascia-guard hook is deprecated and "
+            f"disabled. It is doing nothing. {_REPLACEMENT}",
+            DeprecationWarning, stacklevel=3)
 
 
 def available() -> bool:
-    return _AVAILABLE
+    """False, always. The seam is retired regardless of what is installed."""
+    _warn_if_set()
+    return False
 
 
 def active() -> bool:
-    return _AVAILABLE and (_flag("FASCIA_GUARD") or _flag("FASCIA_GUARD_ENFORCE"))
+    _warn_if_set()
+    return False
 
 
 def enforcing() -> bool:
-    return _AVAILABLE and _flag("FASCIA_GUARD_ENFORCE")
+    _warn_if_set()
+    return False
 
 
 def check_capture(text: str):
-    """Verdict for a would-be capture, or None if inactive."""
-    if not active():
-        return None
-    return guard_before_store(text, source_id="capture")
+    return None
 
 
 def check_recall(text: str):
-    """Verdict for assembled recall text, or None if inactive."""
-    if not active():
-        return None
-    return guard_on_recall(text, source_id="recall")
+    return None
 
 
 def carries_secret(verdict) -> bool:
-    return _AVAILABLE and verdict is not None and has_secret(verdict)
+    return False
 
 
 def redact_secrets(text: str) -> str:
-    """Mask secret spans in recalled text when enforcing; identity otherwise.
-
-    Secrets must never be returned from memory. Applied per-claim at recall so a
-    credential stored before the guard existed (or by another writer) is masked on
-    the way out. Cheap (builtin regex only) — safe for the recall hot path.
-    """
-    if not enforcing() or not text:
-        return text
-    return redact_secret_spans(text)
+    return text
 
 
 def categories(verdict) -> list[str]:
-    if not (_AVAILABLE and verdict is not None):
-        return []
-    return sorted({f.category.value for f in verdict.findings})
+    return []

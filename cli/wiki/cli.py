@@ -16,7 +16,8 @@ from . import (ingest, search as searchmod, queue as queuemod, render as renderm
                evidence as evidencemod, triage as triagemod)
 from . import (api as apimod, backends, candidates as candmod,
                confidence as confmod, feedback as feedbackmod,
-               profiles as profilesmod, refs, scopes as scopesmod)
+               profiles as profilesmod, refs, safety as safetymod,
+               scopes as scopesmod)
 
 # Ledger errors that are a user mistake at the terminal, not a bug: print the
 # message and exit non-zero rather than dumping a traceback.
@@ -156,7 +157,7 @@ def cmd_capture(args):
             scope_list = [scopesmod.parse(s) for s in (args.scope or [])]
             source_id = (refs.parse(args.source, refs.SOURCE)
                          if args.source else None)
-            cid = candmod.create(
+            cid, verdict = candmod.create_checked(
                 repo, text, proposed_by=(args.proposed_by or args.origin),
                 proposed_by_type=args.proposed_by_type, source_id=source_id,
                 source_ref=args.source_ref, task_id=args.task_id,
@@ -166,11 +167,23 @@ def cmd_capture(args):
             sys.exit(f"error: {e}")
         row = repo.one("SELECT source_id FROM memory_candidates WHERE id=?", (cid,))
         sid = row["source_id"]
-        if _emit({"candidate_id": refs.candidate(cid), "source_id": sid,
-                  "status": "pending"}, args.json):
+        quarantined = safetymod.at_least(verdict.decision,
+                                         safetymod.Decision.quarantine)
+        out = {"candidate_id": refs.candidate(cid), "source_id": sid,
+               "status": "pending"}
+        if not verdict.clean:
+            out["safety"] = verdict.summary()
+        if _emit(out, args.json):
             return
         print(f"captured as {refs.candidate(cid)} (pending) "
               f"backed by source #{sid}")
+        if verdict.redacted:
+            print(f"safety: masked content in it ({verdict.reason()}); "
+                  "the original text was not stored.")
+        if quarantined:
+            print(f"safety: QUARANTINED ({verdict.reason()}). It cannot be "
+                  "promoted without `wiki promote --safety-override "
+                  "--override-reason ...`.")
         print("It is unvetted; a human must `wiki promote` it before it is "
               "returned by trusted recall.")
     _spawn_librarian(Config.load(), [sid])
@@ -533,9 +546,14 @@ def cmd_promote(args):
                 for cid in cands:
                     claim = apimod.promote(
                         repo, refs.candidate(cid), reviewer=args.reviewer,
-                        confidence=args.confidence, scope=scope, note=args.note)
-                    print(f"{refs.candidate(cid)} -> {claim['id']} "
-                          f"({scope}, {args.confidence}) by {args.reviewer}")
+                        confidence=args.confidence, scope=scope, note=args.note,
+                        safety_override=args.safety_override,
+                        override_reason=args.override_reason)
+                    line = (f"{refs.candidate(cid)} -> {claim['id']} "
+                            f"({scope}, {args.confidence}) by {args.reviewer}")
+                    if args.safety_override:
+                        line += "  [SAFETY OVERRIDE recorded]"
+                    print(line)
             except _LEDGER_ERRORS as e:
                 sys.exit(f"error: {e}")
             return
@@ -1140,6 +1158,12 @@ def build_parser() -> argparse.ArgumentParser:
     spr.add_argument("--reviewer", default=_whoami(),
                      help="who is promoting (defaults to the current user)")
     spr.add_argument("--note", help="note recorded on the promotion")
+    spr.add_argument("--safety-override", action="store_true",
+                     help="promote a candidate that safety policy blocks "
+                          "(requires --override-reason; the findings are kept)")
+    spr.add_argument("--override-reason",
+                     help="why the safety finding is acceptable; recorded on the "
+                          "candidate alongside the original findings")
     spr.set_defaults(func=cmd_promote)
     srj = sub.add_parser(
         "reject", help="reject claim ids (12 13) or a candidate (candidate_12)")

@@ -38,9 +38,12 @@ retrieval backends own search and indexing sophistication.
 - Do not dump all agent logs into trusted memory.
 - Captured items are not permanent.
 - Retrieval results are **not** automatically trusted.
-- **Trust is not content safety.** Promotion establishes authority, not that the text
-  is free of secrets, PII, or injection payloads — WikiBrain scans no surface today.
-  WikiBrain-local safety scanning is future work; see [SAFETY.md](SAFETY.md).
+- **Trust is not content safety.** Promotion establishes authority, not that the
+  text is free of secrets, PII, or injection payloads. WikiBrain scans capture,
+  recall and promotion and can withhold, mask, or block — but no safety engine and
+  no safety policy may ever set `trusted`. Safety subtracts; it never vouches.
+  Not a secret-scanning, PII, or classifier-training project: detection is
+  delegated to modular engines. See [SAFETY.md](SAFETY.md).
 
 ## 3. Source-of-truth boundary
 

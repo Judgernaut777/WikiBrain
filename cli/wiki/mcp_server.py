@@ -35,7 +35,7 @@ import re
 from .db import Repo
 from . import search as searchmod
 from . import embed as embedmod
-from . import guard_hook
+from . import safety as safetymod
 from . import api as apimod
 from . import backends, candidates, confidence as confmod
 from . import feedback as feedbackmod
@@ -54,6 +54,7 @@ _USER_ERRORS = (
     profiles.ProfileError, scopesmod.ScopeError, refs.RefError,
     confmod.ConfidenceError, backends.BackendError, candidates.CandidateError,
     feedbackmod.FeedbackError, apimod.ApiError, ingest.IngestError,
+    safetymod.SafetyConfigError, safetymod.PolicyError,
 )
 
 # --- citation helpers -------------------------------------------------------
@@ -174,17 +175,12 @@ def tool_capture(repo: Repo, text: str, harness: str = DEFAULT_HARNESS,
     final scope and confidence.
     """
     harness = re.sub(r"[^a-z0-9_-]", "", (harness or DEFAULT_HARNESS).lower()) or DEFAULT_HARNESS
-    # Optional fascia-guard pass: the write door already says "do not capture
-    # secrets" — when enforcing, refuse content that carries credential material
-    # so it never persists (dormant unless FASCIA_GUARD[_ENFORCE] is set).
-    gv = guard_hook.check_capture(text)
-    if gv is not None and guard_hook.enforcing() and guard_hook.carries_secret(gv):
-        return {"error": ("fascia-guard refused capture: content contains "
-                          "secret/credential material — do not store secrets in "
-                          "the brain.")}
+    # Safety runs inside `candidates.create_checked` — at the ledger, not here, so
+    # the CLI and the Python API get the same gate. It masks credentials before the
+    # text is written anywhere, and quarantines injection payloads.
     try:
         proposed = [scopesmod.parse(s) for s in (scopes or [])]
-        cid = candidates.create(
+        cid, verdict = candidates.create_checked(
             repo, text, proposed_by=(proposed_by or harness),
             proposed_by_type=proposed_by_type, source_ref=source_ref,
             task_id=task_id, proposed_scopes=proposed, tags=tags or [],
@@ -192,15 +188,26 @@ def tool_capture(repo: Repo, text: str, harness: str = DEFAULT_HARNESS,
     except _USER_ERRORS as e:
         return {"error": str(e)}
     row = repo.one("SELECT source_id FROM memory_candidates WHERE id = ?", (cid,))
-    return {
+    message = (f"Filed as {refs.candidate(cid)} (pending). It is unvetted and "
+               "will not appear in trusted recall until a human promotes it.")
+    out = {
         "accepted": True,
         "candidate_id": refs.candidate(cid),
         "source_id": row["source_id"],
         "origin": f"session/{harness}",
         "status": "pending",
-        "message": (f"Filed as {refs.candidate(cid)} (pending). It is unvetted and "
-                    "will not appear in trusted recall until a human promotes it."),
     }
+    if not verdict.clean:
+        out["safety"] = verdict.summary()
+        if verdict.redacted:
+            message += (" Safety policy masked content in it "
+                        f"({verdict.reason()}); the original was not stored.")
+        if safetymod.at_least(verdict.decision, safetymod.Decision.quarantine):
+            out["quarantined"] = True
+            message += (f" It is QUARANTINED ({verdict.reason()}) and cannot be "
+                        "promoted without an explicit human override.")
+    out["message"] = message
+    return out
 
 
 def tool_feedback(repo: Repo, feedback: str, actor_id: str,

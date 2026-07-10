@@ -57,6 +57,28 @@ DEFAULTS = {
         "read_only": False,     # if True, `wiki mcp serve` omits the capture write tool
         "recall_k": 8,          # default top-k claims returned by brain_recall
     },
+    "safety": {
+        # WikiBrain-local memory safety (docs/SAFETY.md). WikiBrain owns policy;
+        # detection is delegated to modular engines. The default set is
+        # lightweight: `baseline` is pure stdlib, and `detect_secrets` is simply
+        # inert when its package is absent. Nothing here spawns a process, loads a
+        # model, or makes a network call.
+        #
+        # Full schema, per-engine options and install extras live in
+        # wiki/safety/configuration.py and config.example.toml. Unknown engine
+        # names are a hard error, because a typo that silently disables secret
+        # scanning is the worst possible failure mode.
+        "enabled": True,
+        "max_text_chars": 200_000,
+        "engines": {
+            "baseline": {"enabled": True, "required": True},
+            "detect_secrets": {"enabled": True, "required": False},
+            "trufflehog": {"enabled": False},
+            "gitleaks": {"enabled": False},
+            "presidio": {"enabled": False},
+            "prompt_guard": {"enabled": False},
+        },
+    },
     "retrieval": {
         # Which retrieval backend serves recall (LEDGER_SPEC.md §8). The backend
         # returns *candidates*; WikiBrain applies trust/status/scope filtering

@@ -24,6 +24,7 @@ from dataclasses import asdict, dataclass, field
 
 from .db import Repo
 from . import backends, candidates, feedback as feedbackmod, profiles, refs, review
+from . import safety
 from . import scopes as scopesmod
 from .recall import RecallPack, RecallRequest, recall as _recall
 from .scopes import Scope
@@ -53,9 +54,17 @@ class CaptureResult:
     candidate_id: str
     status: str
     message: str = ""
+    #: Audit-safe verdict, present only when the capture was not clean. Never
+    #: contains matched text. `quarantined` items are stored but cannot be
+    #: promoted without an explicit human override.
+    safety: dict | None = None
+    quarantined: bool = False
 
     def as_dict(self) -> dict:
-        return asdict(self)
+        d = asdict(self)
+        if d.get("safety") is None:
+            d.pop("safety")
+        return d
 
 
 @dataclass
@@ -150,17 +159,33 @@ def recall(repo: Repo, request) -> RecallPack:
 
 
 def capture_candidate(repo: Repo, request) -> CaptureResult:
-    """File a PENDING memory candidate. Never promotes, under any argument."""
+    """File a PENDING memory candidate. Never promotes, under any argument.
+
+    Safety runs before the text is stored (docs/SAFETY.md). Credential material is
+    masked, so the raw value never reaches the inbox artifact or the candidate row;
+    high-risk injection and tool-control payloads are quarantined and cannot be
+    promoted without an explicit human override. A refused capture raises
+    `candidates.SafetyRefused`.
+    """
     req = _as_capture_request(request)
-    cid = candidates.create(
+    cid, verdict = candidates.create_checked(
         repo, req.text, proposed_by=req.proposed_by,
         proposed_by_type=req.proposed_by_type, source_id=req.source_id,
         source_ref=req.source_ref, task_id=req.task_id,
         proposed_scopes=req.proposed_scopes, tags=req.tags, metadata=req.metadata)
+    message = ("Filed as a pending candidate. It is unvetted and will not appear "
+               "in trusted recall until a human promotes it.")
+    quarantined = safety.at_least(verdict.decision, safety.Decision.quarantine)
+    if verdict.redacted:
+        message += (f" Safety policy masked content in it ({verdict.reason()}); "
+                    "the original was not stored.")
+    if quarantined:
+        message += (f" It is QUARANTINED ({verdict.reason()}) and cannot be "
+                    "promoted without an explicit human override.")
     return CaptureResult(
         accepted=True, candidate_id=refs.candidate(cid), status="pending",
-        message=("Filed as a pending candidate. It is unvetted and will not appear "
-                 "in trusted recall until a human promotes it."))
+        message=message, quarantined=quarantined,
+        safety=None if verdict.clean else verdict.summary())
 
 
 def record_feedback(repo: Repo, request) -> None:
@@ -185,12 +210,16 @@ def health(repo: Repo) -> dict:
         backend_health = backends.get_backend(repo).health()
     except backends.BackendError as e:
         backend_health = {"ok": False, "error": str(e)}
+    safety_health = safety.health(repo)
     return {
-        "ok": bool(backend_health.get("ok")),
+        # A ledger whose required safety engines cannot run is not healthy: it will
+        # fail closed on every promotion and withhold on every recall.
+        "ok": bool(backend_health.get("ok")) and bool(safety_health.get("ok")),
         "service": "wikibrain",
         "role": "trusted memory ledger",
         "schema_version": repo.one("PRAGMA user_version")[0],
         "backend": backend_health,
+        "safety": safety_health,
         "profiles": list(profiles.NAMES),
         "ledger": {
             "sources": n("SELECT COUNT(*) AS n FROM sources"),
@@ -210,13 +239,21 @@ def pending(repo: Repo, limit: int = 50) -> list[dict]:
 
 
 def promote(repo: Repo, candidate_id, reviewer: str, confidence: str, scope=None,
-            reviewer_type: str = "human", note: str | None = None) -> dict:
+            reviewer_type: str = "human", note: str | None = None,
+            safety_override: bool = False,
+            override_reason: str | None = None) -> dict:
     """Promote a pending candidate. `scope` may be omitted when the candidate
     proposed exactly one — the reviewer is then accepting the proposal as filed.
 
     An ambiguous or absent proposal is an error, never a guess: silently promoting
     a claim into the wrong scope is how a repo fact leaks into global recall.
     Confidence is never guessed either — it is what the profiles filter on.
+
+    Safety is a second, independent gate: a candidate carrying a credential or a
+    high-risk injection payload is refused with `candidates.SafetyRefused`. A
+    reviewer who has verified the risk may pass `safety_override=True` with an
+    `override_reason`; the override is recorded alongside the original findings and
+    never relabels them as clean.
     """
     cid = refs.parse(candidate_id, refs.CANDIDATE)
     if scope is None:
@@ -233,7 +270,8 @@ def promote(repo: Repo, candidate_id, reviewer: str, confidence: str, scope=None
         scope = scopesmod.from_dict(scope)
     claim_id = candidates.promote(
         repo, cid, reviewer=reviewer, confidence=confidence, scope=scope,
-        reviewer_type=reviewer_type, note=note)
+        reviewer_type=reviewer_type, note=note, safety_override=safety_override,
+        override_reason=override_reason)
     row = repo.one("SELECT * FROM claims WHERE id = ?", (claim_id,))
     return {"id": refs.claim(claim_id), "text": row["text"], "status": row["status"],
             "confidence": row["confidence_label"], "scope": str(scope),

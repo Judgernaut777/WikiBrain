@@ -44,7 +44,7 @@ contradicts one you already trust.
 | **[docs/STATUS.md](docs/STATUS.md)** | Where the project stands right now: schema version, gate count, the current freeze, and what may still change |
 | **[docs/LEDGER_SPEC.md](docs/LEDGER_SPEC.md)** | The design contract — trust, scopes, profiles, the backend seam, and the [trust rule (§14.1)](docs/LEDGER_SPEC.md) every consumer must obey |
 | **[docs/MIGRATIONS.md](docs/MIGRATIONS.md)** | Schema evolution, and the live-DB hazard: `Repo.open()` migrates, and a temp repo root is **not** isolation |
-| **[docs/SAFETY.md](docs/SAFETY.md)** | What the trust gate does and does not protect against — and why **trusted is not the same as safe to expose** |
+| **[docs/SAFETY.md](docs/SAFETY.md)** | Memory safety: the surfaces WikiBrain scans, the modular engines, and why **trusted is not the same as safe to expose** |
 | **BUILD_SPEC.md** | The origin design |
 | **SCHEMA.md** | Living conventions: vocabularies and state machines |
 
@@ -102,6 +102,17 @@ at that.
 `status: "promoted"` is not. A promoted claim in an open contradiction comes back
 `promoted` *and* untrusted. A missing `trusted` means untrusted; never infer it from
 `status`. See [docs/LEDGER_SPEC.md §14.1](docs/LEDGER_SPEC.md).
+
+**Trusted is not the same as safe to expose.** Promotion decides *authority*; it says
+nothing about whether the text carries an API key. WikiBrain scans capture, recall and
+promotion: a credential is masked before it is ever stored, a trusted claim carrying one
+comes back **trusted with the credential masked**, and injection or tool-control payloads
+are withheld. No safety engine and no safety policy may ever set `trusted` — safety
+subtracts, it never vouches. The built-in ruleset is pure stdlib and deliberately
+limited; [detect-secrets](https://github.com/Yelp/detect-secrets), TruffleHog, Gitleaks,
+Presidio and a local injection classifier plug in as optional engines. An engine that
+could not run is never mistaken for one that found nothing. See
+[docs/SAFETY.md](docs/SAFETY.md).
 
 **Reaching wiki-brain over HTTP** needs a `wiki serve` that **does not exist yet**.
 AgentConnect's adapter expects a REST service at `:8787`; the cross-repo integration

@@ -25,10 +25,10 @@ frozen*, below), so the tip of `main` may sit above it without any code having m
 | | |
 |---|---|
 | Schema version | **9** (`schema.SCHEMA_VERSION == migrate.latest_version()`) |
-| Gate | **435 checks pass, 0 failures** |
+| Gate | **518 checks pass, 0 failures** |
 | Retrieval backend | `sqlite_fts` (the only one implemented) |
 | Transport | in-process Python API + MCP stdio. **No HTTP server** — see below |
-| Content safety | **none** — trust is authority, not sanitisation. See [SAFETY.md](SAFETY.md) |
+| Content safety | built-in at capture / recall / promotion. Engines modular; baseline is stdlib-only. See [SAFETY.md](SAFETY.md) |
 
 Run the gate with:
 
@@ -36,12 +36,14 @@ Run the gate with:
 PYTHONPATH=/path/to/WikiBrain/cli python3 tests/acceptance.py
 ```
 
-Four further checks cover the dormant legacy guard hook in `cli/wiki/guard_hook.py`
-and are skipped unless its optional external package imports (439 pass when it is
-stubbed). Nothing requires that package, and no user needs it. Because those checks
-are dead code by default they rot silently — see [MIGRATIONS.md](MIGRATIONS.md) for
-how the suite is kept honest, and [SAFETY.md](SAFETY.md) for the built-in module
-intended to replace the hook.
+The gate is **offline**: the only safety engine that runs is the pure-stdlib
+baseline, and every third-party adapter is exercised through a fake. A suite that
+needs TruffleHog installed is a suite that gets skipped. The count is stable whether
+or not the optional engines are present.
+
+The legacy `fascia-guard` hook in `cli/wiki/guard_hook.py` is **deprecated and
+inert** — see [SAFETY.md](SAFETY.md). Two safety pipelines must never both be
+authoritative.
 
 ---
 
@@ -53,9 +55,10 @@ It is a standalone product and depends on nothing else to run.
 Full design: **[LEDGER_SPEC.md](LEDGER_SPEC.md)**.
 
 **Trusted is not the same as safe to expose.** Promotion establishes authority; it
-does not scan content. A promoted claim may still carry a secret, PII or injection
-text. WikiBrain-local safety scanning is **future work**, specified in
-[SAFETY.md](SAFETY.md) and not yet built.
+says nothing about whether the text carries a secret. WikiBrain-local safety
+scanning enforces the second question at capture, recall and promotion: a trusted
+claim containing a credential comes back **trusted, with the credential masked**.
+No engine and no policy may set `trusted`. See [SAFETY.md](SAFETY.md).
 
 ## The trust contract
 

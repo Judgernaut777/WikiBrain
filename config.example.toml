@@ -198,3 +198,82 @@ max_tokens = 4096
 # to json_object, then plain — safe to leave on. Honored by llama.cpp, vLLM,
 # SGLang (xgrammar), OpenAI.
 json_schema = true
+
+# --- memory safety (docs/SAFETY.md) -----------------------------------------
+# WikiBrain owns the POLICY: when memory is scanned, and what happens when
+# something is found. Detection is delegated to modular engines, and the good
+# ones are maintained by other people.
+#
+# `trusted` and `safe` are independent. Promotion decides authority; safety
+# decides exposure. A promoted claim carrying an API key is trusted and unsafe,
+# and it comes back from recall with the key masked.
+#
+# Enforced surfaces: memory_candidate (capture), memory_recall (read),
+# memory_promotion (the human gate). Source ingest and Obsidian projection are
+# specified as future work and are not scanned.
+[safety]
+enabled = true                   # false disables scanning entirely (not recommended)
+max_text_chars = 200000          # truncate before scanning; a claim is not a file
+
+# `enabled` and `available` are different questions. An engine that is enabled but
+# whose dependency is missing reports `unavailable` — never "found nothing". If it
+# is also `required`, the content is treated as unscanned, and unscanned is not
+# clean: promotion blocks and recall withholds. Set `required = true` only for
+# engines you have actually installed.
+
+# Built-in, pure stdlib, always available. Deliberately limited: obvious secrets,
+# obvious injection phrases, basic unsafe tool directives, suspicious encoded
+# blobs. It is a floor, not a product. Cannot be disabled while safety is enabled.
+[safety.engines.baseline]
+enabled = true
+required = true
+
+# Yelp detect-secrets. Pure Python, no subprocess: `pip install wiki-brain[safety-secrets]`.
+# The first engine worth enabling — entropy detection and a maintained plugin set.
+# Inert (and harmless) when the package is absent.
+[safety.engines.detect_secrets]
+enabled = true
+required = false
+
+# TruffleHog. A separately-installed executable, not a pip package.
+# Runs only where the policy asks for whole-file scanning — promotion — never on
+# the recall path. `allow_network_verification` makes TruffleHog authenticate a
+# candidate credential against its real service to check whether it still works.
+# That mails the secret to a third party. Leave it off.
+[safety.engines.trufflehog]
+enabled = false
+required = false
+# executable = "trufflehog"
+# timeout_seconds = 20.0
+# allow_network_verification = false
+
+# Gitleaks. An alternative to TruffleHog, not a companion — enabling both doubles
+# the subprocess cost on every promotion for a thin margin. Pick one.
+[safety.engines.gitleaks]
+enabled = false
+required = false
+# executable = "gitleaks"
+# timeout_seconds = 20.0
+
+# Microsoft Presidio. The preferred PII engine: `pip install wiki-brain[safety-pii]`,
+# then `python -m spacy download en_core_web_lg`. WikiBrain will not build a PII
+# platform; the baseline finds an email and a card and nothing else.
+[safety.engines.presidio]
+enabled = false
+required = false
+# score_threshold = 0.5
+
+# A maintained local prompt-injection classifier: `pip install wiki-brain[safety-injection]`.
+# Defaults to protectai/deberta-v3-base-prompt-injection-v2 (Apache-2.0, ungated).
+# Point `model` at meta-llama/Llama-Prompt-Guard-2-86M if you have accepted its
+# licence. Pin `revision` to a commit: a classifier that silently changes its
+# weights changes what WikiBrain withholds. It reports `unavailable` rather than
+# downloading, unless `allow_download` is set — a recall must never become a
+# network call. This layer raises attacker cost; it is not an authority.
+[safety.engines.prompt_guard]
+enabled = false
+required = false
+# model = "protectai/deberta-v3-base-prompt-injection-v2"
+# revision = ""                  # pin me
+# threshold = 0.5
+# allow_download = false

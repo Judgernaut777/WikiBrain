@@ -20,6 +20,18 @@ semantic = ["sentence-transformers>=3", "numpy>=1.26"]          # local embeddin
 mcp = ["mcp>=1.2"]                                             # expose the brain as an MCP server (no API key, no model call)
 watch = ["watchdog>=4"]                                         # responsive `wiki-librarian watch`; stdlib poll fallback if absent
 
+# Memory-safety detection engines (docs/SAFETY.md). WikiBrain owns the policy; these
+# are the optional engines that do the detecting. The built-in `baseline` engine is
+# pure stdlib and needs none of them, so a default install stays lightweight and
+# scans offline. Each engine reports itself `unavailable` — never "clean" — when its
+# dependency is absent.
+safety-secrets = ["detect-secrets>=1.5"]                        # entropy + maintained plugin set
+safety-pii = ["presidio-analyzer>=2.2"]                         # needs a spaCy model: `python -m spacy download en_core_web_lg`
+safety-injection = ["transformers>=4.40", "torch>=2.0"]         # local pinned classifier, CPU is fine
+safety-all = ["detect-secrets>=1.5", "presidio-analyzer>=2.2", "transformers>=4.40", "torch>=2.0"]
+# TruffleHog and Gitleaks are separately-installed executables, not Python packages;
+# there is no extra for them. They are found on PATH and run as subprocesses.
+
 [project.scripts]
 wiki = "wiki.cli:main"
 # The librarian is the model-BEARING half — a separate console script and a
@@ -34,7 +46,13 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-packages = ["wiki", "librarian"]
+# Subpackages must be listed explicitly: setuptools does not recurse into a plain
+# `packages` list, so `wiki.backends` was silently absent from every wheel built
+# before this line existed.
+packages = [
+    "wiki", "wiki.backends", "wiki.safety", "wiki.safety.baseline",
+    "wiki.safety.engines", "librarian",
+]
 
 # Scoped conservatively: real-bug rules only (unused imports/names, undefined
 # names, syntax errors). No broad style rules — this project's style is
