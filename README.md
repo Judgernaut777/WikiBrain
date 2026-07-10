@@ -10,6 +10,9 @@
 > **A standalone, self-hosted, privacy-first trusted memory ledger.** It runs on its own
 > and needs nothing else installed. [AgentConnect](https://github.com/Judgernaut777/mcp-agentconnect)
 > is an **optional** control-plane integration for managed coding-agent workflows.
+>
+> The product is **BrainConnect**. The Python package and CLI still say `wiki`, and the
+> MCP tools `brain_*`; that rename is deferred — see [docs/STATUS.md](docs/STATUS.md).
 
 WikiBrain is a trusted memory ledger for agent systems. Agents can propose memory candidates, but trusted claims are human-gated, scoped, provenance-backed, and governed by promotion, rejection, contradiction, and supersession rules. It is designed to act as the authority layer for project memory while leaving task execution, routing, and workflow state to systems like AgentConnect.
 
@@ -41,10 +44,11 @@ contradicts one you already trust.
 
 | Document | Read it for |
 |---|---|
-| **[docs/STATUS.md](docs/STATUS.md)** | Where the project stands right now: schema version, gate count, the current freeze, and what may still change |
+| **[docs/STATUS.md](docs/STATUS.md)** | Where the project stands right now: current checkpoint, schema version, gate count, repository boundaries, and deferred work |
 | **[docs/LEDGER_SPEC.md](docs/LEDGER_SPEC.md)** | The design contract — trust, scopes, profiles, the backend seam, and the [trust rule (§14.1)](docs/LEDGER_SPEC.md) every consumer must obey |
 | **[docs/MIGRATIONS.md](docs/MIGRATIONS.md)** | Schema evolution, and the live-DB hazard: `Repo.open()` migrates, and a temp repo root is **not** isolation |
-| **[docs/SAFETY.md](docs/SAFETY.md)** | Memory safety: the surfaces WikiBrain scans, the modular engines, and why **trusted is not the same as safe to expose** |
+| **[docs/SAFETY.md](docs/SAFETY.md)** | Memory safety: the surfaces BrainConnect scans, the modular engines, and why **trusted is not the same as safe to expose** |
+| **[docs/INTEGRATIONS.md](docs/INTEGRATIONS.md)** | The optional services around it — AgentConnect (integrated), ComputeConnect and ToolConnect (notes only) — and the rule that no service may write trusted memory |
 | **BUILD_SPEC.md** | The origin design |
 | **SCHEMA.md** | Living conventions: vocabularies and state machines |
 
@@ -123,7 +127,7 @@ real ledger, real promotion and the real trust filter — but no wire plumbing. 
 > exists.**
 
 `wiki serve` is a tracked, deferred follow-up — see
-[docs/LEDGER_SPEC.md §14.2](docs/LEDGER_SPEC.md) and [docs/STATUS.md](docs/STATUS.md).
+[docs/LEDGER_SPEC.md §14.3](docs/LEDGER_SPEC.md) and [docs/STATUS.md](docs/STATUS.md).
 
 ---
 

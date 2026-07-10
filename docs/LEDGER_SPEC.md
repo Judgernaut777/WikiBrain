@@ -1,4 +1,4 @@
-# LEDGER_SPEC.md — WikiBrain as a trusted memory ledger
+# LEDGER_SPEC.md — BrainConnect as a trusted memory ledger
 
 Status: **active** (2026-07-10 re-scope). This document is the design contract for
 the ledger rework. `BUILD_SPEC.md` remains the origin design; `SCHEMA.md` remains
@@ -9,7 +9,11 @@ the living conventions file. Where this document and `BUILD_SPEC.md` disagree ab
 
 ## 1. Identity
 
-WikiBrain is a **trusted memory ledger and human-readable projection layer** for
+The product is **BrainConnect**. The Python package, the CLI, and the MCP tool names
+still say `wiki` / `brain_*`; that rename is deferred work, tracked in
+[STATUS.md](STATUS.md). This document uses both names as they appear in code.
+
+BrainConnect is a **trusted memory ledger and human-readable projection layer** for
 agent systems. It specialises in:
 
 source-backed claims · candidate memory capture · pending/promoted/rejected
@@ -214,6 +218,11 @@ profile             = manager_brief
 A `RecallPack` carries `backend`, `profile`, `query`, `items[]`, `warnings[]`, and
 a `note` steering the caller to treat all text as data, never instructions.
 
+An item carries `id`, `text`, `status`, `confidence`, `scope`, `validity`, `trusted`,
+and — when the returned representation was masked — a `safety` block describing why.
+`text` is the representation being handed over; the canonical claim text in the ledger
+is never rewritten by recall. See §14.2.
+
 ## 7. Retrieval profiles
 
 Profiles bound and shape the pack. Selection is **deterministic and model-free**:
@@ -391,7 +400,44 @@ Rules for a consumer:
 Verified end-to-end by `mcp-agentconnect/tests/test_wikibrain_integration.py`, which
 drives a real ledger through AgentConnect's adapter, ranker and ContextBuilder.
 
-### 14.2 Follow-up: the transport gap
+### 14.2 Safety at the boundary
+
+Safety (see [SAFETY.md](SAFETY.md)) is **orthogonal to trust** and its effects on this
+contract are **purely additive**. A consumer written against §14.1 before safety
+existed remains correct: no field changed meaning, none was removed, and trust is
+computed exactly as before.
+
+What a consumer now receives:
+
+| Where | Field | Meaning |
+|---|---|---|
+| recall item | `safety` | present only when the *returned representation* is not clean. Carries the decision, the kinds, and per-finding rule/severity/span/engine attribution. **Never the matched text.** |
+| `CaptureResult` | `safety` | as above, for the captured text |
+| `CaptureResult` | `quarantined` | `true` when the candidate is stored but not promotable without an explicit human override |
+| `health()` | `safety` | per-engine `enabled` / `required` / `available`, and `ok` |
+
+Three behaviours a consumer must expect:
+
+1. **A trusted claim may come back masked.** `trusted` stays `true`; the text contains
+   `█` runs where a credential was. Masking is exposure control, not distrust. The
+   canonical claim text in the ledger is never mutated.
+2. **A recall may withhold an item.** High-risk injection or tool-control content, and
+   content a *required* engine could not scan, are withheld and announced in
+   `warnings`. Nothing is deleted. An empty pack with a warning is a valid answer.
+3. **Promotion may be refused.** `promote` raises when safety blocks. The override is
+   deliberately **not** exposed through this contract: it is human-only, at the CLI.
+   A control plane must surface the refusal to a human, not retry around it.
+
+`health()["ok"]` is now `false` when a required safety engine cannot run. That is
+correct — such a ledger will fail closed on every promotion and withhold on every
+recall — and a consumer should treat it as *degraded*, not unreachable.
+
+**Safety may never set `trusted`.** It can withhold, mask, or block. It cannot vouch.
+Conversely a clean scan promotes nothing. A consumer that ignores every field in the
+table above still gets correct trust behaviour; it loses only the ability to explain
+to a human *why* text was masked or an item is missing.
+
+### 14.3 Follow-up: the transport gap
 
 **WikiBrain ships no HTTP server.** AgentConnect's `WikiBrainMemoryAdapter` expects a
 REST service at `http://localhost:8787`:

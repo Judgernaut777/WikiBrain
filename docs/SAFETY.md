@@ -1,10 +1,13 @@
-# SAFETY.md — memory safety in WikiBrain
+# SAFETY.md — memory safety in BrainConnect
 
-WikiBrain owns **policy**: when memory is scanned, and what happens when something
+> The product is **BrainConnect**. The Python package is still `wiki` and the safety
+> module is `cli/wiki/safety/`; that rename is deferred (see [STATUS.md](STATUS.md)).
+
+BrainConnect owns **policy**: when memory is scanned, and what happens when something
 is found. It does not own **detection**. Detection is delegated to modular engines,
 and the good ones are maintained by other people.
 
-WikiBrain is not becoming an enterprise secret scanner, a PII platform, or a
+BrainConnect is not becoming an enterprise secret scanner, a PII platform, or a
 prompt-injection model project. It has a small built-in ruleset so that a default
 install is safe offline, and a clean seam for engines that are better than it.
 
@@ -86,7 +89,7 @@ is already open is itself an error.
 
 An engine answers *does this text contain a probable secret*. It never decides what
 happens next. Each declares `name`, `version`, `capabilities`, `available()`, and
-`scan()`; findings are normalized into a WikiBrain-owned model carrying `engine`,
+`scan()`; findings are normalized into a BrainConnect-owned model carrying `engine`,
 `engine_version`, `kind`, `rule`, `severity`, `confidence`, `span`, `message`, and
 `metadata`.
 
@@ -130,13 +133,13 @@ evidence.
 ### No network, by default and by construction
 
 TruffleHog offers to *verify* a candidate credential by authenticating against the
-service it belongs to. That is exfiltration: it takes the secret WikiBrain is trying
+service it belongs to. That is exfiltration: it takes the secret BrainConnect is trying
 to contain and mails it to a third party to ask whether it still works. It is off
 unless `allow_network_verification = true`, per engine.
 
 `prompt_guard` reports itself `unavailable` rather than downloading weights, unless
 `allow_download = true`. A recall must never become a network call. Pin `revision`:
-a classifier that silently changes its weights changes what WikiBrain withholds.
+a classifier that silently changes its weights changes what BrainConnect withholds.
 
 The deterministic core CLI still makes **zero model calls**. `prompt_guard` is the
 only engine that runs one, it is local, and it is off by default.
@@ -242,7 +245,7 @@ Read these as the contract, not as a disclaimer.
   where it sits.
 - **Source ingest and Obsidian projection are unscanned.** Both are named below.
 - **A quarantined candidate is stored.** Quarantine flags and blocks promotion; it
-  does not delete. Nothing in WikiBrain deletes memory as a safety action.
+  does not delete. Nothing in BrainConnect deletes memory as a safety action.
 
 ---
 
@@ -286,7 +289,12 @@ crash, and it will be deleted.
 ## Integration note
 
 [AgentConnect](https://github.com/Judgernaut777/mcp-agentconnect) is an **optional**
-control-plane integration; WikiBrain works independently. The trust boundary is
-specified in [LEDGER_SPEC.md §14](LEDGER_SPEC.md). A consumer on the far side
+control-plane integration; BrainConnect works independently. The trust boundary is
+specified in [LEDGER_SPEC.md §14.1](LEDGER_SPEC.md); what safety adds to that
+contract — the additive `safety` and `quarantined` fields, withheld items, refused
+promotions, degraded health — is [§14.2](LEDGER_SPEC.md). A consumer on the far side
 inherits authority guarantees from `trusted`, and exposure guarantees from this
-document — and must not confuse the two.
+document, and must not confuse the two.
+
+Broader integration notes, including ComputeConnect and ToolConnect, are in
+[INTEGRATIONS.md](INTEGRATIONS.md).
