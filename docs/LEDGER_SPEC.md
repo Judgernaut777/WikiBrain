@@ -38,6 +38,9 @@ retrieval backends own search and indexing sophistication.
 - Do not dump all agent logs into trusted memory.
 - Captured items are not permanent.
 - Retrieval results are **not** automatically trusted.
+- **Trust is not content safety.** Promotion establishes authority, not that the text
+  is free of secrets, PII, or injection payloads — WikiBrain scans no surface today.
+  WikiBrain-local safety scanning is future work; see [SAFETY.md](SAFETY.md).
 
 ## 3. Source-of-truth boundary
 
@@ -343,6 +346,10 @@ Pending candidates render in their own clearly-labeled review queue — never as
 trusted knowledge.
 
 ## 14. AgentConnect integration contract
+
+AgentConnect is an **optional** control-plane integration. WikiBrain works
+independently as a trusted memory ledger; this section binds the contract for
+deployments that choose to use both.
 
 WikiBrain exposes exactly the adapter shape AgentConnect's `MemoryAdapter` expects:
 

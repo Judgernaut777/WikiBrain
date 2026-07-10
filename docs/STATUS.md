@@ -26,9 +26,9 @@ frozen*, below), so the tip of `main` may sit above it without any code having m
 |---|---|
 | Schema version | **9** (`schema.SCHEMA_VERSION == migrate.latest_version()`) |
 | Gate | **435 checks pass, 0 failures** |
-| Gate with `fascia_guard` stubbed | **439 checks pass, 0 failures** |
 | Retrieval backend | `sqlite_fts` (the only one implemented) |
 | Transport | in-process Python API + MCP stdio. **No HTTP server** — see below |
+| Content safety | **none** — trust is authority, not sanitisation. See [SAFETY.md](SAFETY.md) |
 
 Run the gate with:
 
@@ -36,9 +36,12 @@ Run the gate with:
 PYTHONPATH=/path/to/WikiBrain/cli python3 tests/acceptance.py
 ```
 
-Four of those checks exercise the optional `fascia-guard` integration and are skipped
-unless the package imports. They are otherwise dead code, so they rot silently — see
-[MIGRATIONS.md](MIGRATIONS.md) for how the suite is kept honest.
+Four further checks cover the dormant legacy guard hook in `cli/wiki/guard_hook.py`
+and are skipped unless its optional external package imports (439 pass when it is
+stubbed). Nothing requires that package, and no user needs it. Because those checks
+are dead code by default they rot silently — see [MIGRATIONS.md](MIGRATIONS.md) for
+how the suite is kept honest, and [SAFETY.md](SAFETY.md) for the built-in module
+intended to replace the hook.
 
 ---
 
@@ -46,7 +49,13 @@ unless the package imports. They are otherwise dead code, so they rot silently �
 
 A **trusted memory ledger** with a **pluggable retrieval backend**. It owns trust and
 provenance; a backend owns search sophistication. Agents propose, humans promote.
+It is a standalone product and depends on nothing else to run.
 Full design: **[LEDGER_SPEC.md](LEDGER_SPEC.md)**.
+
+**Trusted is not the same as safe to expose.** Promotion establishes authority; it
+does not scan content. A promoted claim may still carry a secret, PII or injection
+text. WikiBrain-local safety scanning is **future work**, specified in
+[SAFETY.md](SAFETY.md) and not yet built.
 
 ## The trust contract
 
@@ -82,6 +91,10 @@ incident where a verification script migrated the live database, and the rules f
 writing a migration: **[MIGRATIONS.md](MIGRATIONS.md)**.
 
 ## AgentConnect integration boundary
+
+AgentConnect is an **optional** control-plane integration for managed coding-agent
+workflows. WikiBrain does not require it, and nothing below is needed to run WikiBrain
+on its own. When the two are used together, ownership divides like this:
 
 | Owner | Responsibility |
 |---|---|

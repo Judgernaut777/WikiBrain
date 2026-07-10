@@ -7,7 +7,9 @@
 
 <!-- Suggested GitHub topics (set in the repo's About panel): mcp · ai-agents · agent-memory · knowledge-base · obsidian · sqlite · local-first · llm -->
 
-> **Part of the [Fascia](https://github.com/Judgernaut777/Fascia-AI-OS) ecosystem** — the **memory** layer. Fascia connects this with the **control plane** ([mcp-agentconnect](https://github.com/Judgernaut777/mcp-agentconnect)), a multi-harness subagent fabric, and a shared **guard** ([fascia-guard](https://github.com/Judgernaut777/fascia-guard)) into one self-hosted, privacy-first agent stack.
+> **A standalone, self-hosted, privacy-first trusted memory ledger.** It runs on its own
+> and needs nothing else installed. [AgentConnect](https://github.com/Judgernaut777/mcp-agentconnect)
+> is an **optional** control-plane integration for managed coding-agent workflows.
 
 WikiBrain is a trusted memory ledger for agent systems. Agents can propose memory candidates, but trusted claims are human-gated, scoped, provenance-backed, and governed by promotion, rejection, contradiction, and supersession rules. It is designed to act as the authority layer for project memory while leaving task execution, routing, and workflow state to systems like AgentConnect.
 
@@ -42,6 +44,7 @@ contradicts one you already trust.
 | **[docs/STATUS.md](docs/STATUS.md)** | Where the project stands right now: schema version, gate count, the current freeze, and what may still change |
 | **[docs/LEDGER_SPEC.md](docs/LEDGER_SPEC.md)** | The design contract — trust, scopes, profiles, the backend seam, and the [trust rule (§14.1)](docs/LEDGER_SPEC.md) every consumer must obey |
 | **[docs/MIGRATIONS.md](docs/MIGRATIONS.md)** | Schema evolution, and the live-DB hazard: `Repo.open()` migrates, and a temp repo root is **not** isolation |
+| **[docs/SAFETY.md](docs/SAFETY.md)** | What the trust gate does and does not protect against — and why **trusted is not the same as safe to expose** |
 | **BUILD_SPEC.md** | The origin design |
 | **SCHEMA.md** | Living conventions: vocabularies and state machines |
 
