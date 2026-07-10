@@ -21,7 +21,7 @@ Read "BrainConnect" as the product and "`wiki`" as the module it currently ships
 
 | Checkpoint | Commit | What it is |
 |---|---|---|
-| **Current tip** | **`600fea8`** | The consumer contract: fixtures in `tests/contract/`, and the refusal taxonomy in `cli/wiki/errors.py`. Additive only — no behaviour changed. |
+| **Contract tip** | **`221e4f2`** | The consumer contract: fixtures in `tests/contract/`, and the refusal taxonomy in `cli/wiki/errors.py`. Additive only — no behaviour changed. |
 | **Behaviour tip** | **`b128e65`** | Memory safety: `cli/wiki/safety/`, enforced at capture, recall and promotion. **The last commit that changed enforced behaviour.** Diff against this when asking "did anything move?" |
 | **Trust behaviour** | **`b69e13c`** | `trusted_only` began meaning trusted; disputed claims stopped leaking as trusted. |
 | **Tag** | **`v0.1.0-mvp-control-loop`** | Annotated, at `f10569d`. The MVP control-loop checkpoint, taken before safety landed. |
