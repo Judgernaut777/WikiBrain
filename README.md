@@ -1,4 +1,4 @@
-# wiki-brain
+# WikiBrain
 
 ![CI](https://github.com/Judgernaut777/WikiBrain/actions/workflows/ci.yml/badge.svg)
 ![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)
