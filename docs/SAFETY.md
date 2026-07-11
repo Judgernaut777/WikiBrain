@@ -267,6 +267,10 @@ Read these as the contract, not as a disclaimer.
 - **Source ingest and Obsidian projection are unscanned.** Both are named below.
 - **A quarantined candidate is stored.** Quarantine flags and blocks promotion; it
   does not delete. Nothing in BrainConnect deletes memory as a safety action.
+- **A redacted candidate promotes without an override.** Deliberate, and safe:
+  `redact` stored only the mask (the secret never reached the ledger), so promoting
+  it publishes nothing sensitive. The human-override gate applies to
+  `quarantine`/`block`, where the flagged content itself is at stake.
 
 ---
 

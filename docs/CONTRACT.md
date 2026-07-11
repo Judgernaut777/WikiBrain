@@ -124,6 +124,11 @@ Pinned by `recall_pack_withheld.json`.
 Secrets are masked **before** storage, so a redacted capture's original text was never
 written to the candidate row or to the `inbox/` artifact.
 
+For the same reason, a redacted candidate (decision `redact`, not `quarantine`/`block`)
+can be **promoted without an override** — only the mask was ever stored, so promotion
+publishes nothing sensitive; the human-override gate protects quarantined content,
+whose original text *is* stored.
+
 Pinned by `capture_result_clean.json` and `capture_result_quarantined.json`.
 
 ### Health
