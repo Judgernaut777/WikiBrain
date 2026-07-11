@@ -1688,7 +1688,7 @@ def main():
             return False
         check("safety: no engine or policy can set trust (AST of the whole package)",
               not any(_mentions_trusted(p.read_text(encoding="utf-8"))
-                      for p in Path("cli/wiki/safety").rglob("*.py")))
+                      for p in Path("cli/brainconnect/safety").rglob("*.py")))
 
         # --- the legacy fascia-guard seam is retired ---------------------------
         from brainconnect import guard_hook
@@ -1716,7 +1716,7 @@ def main():
                 os.environ[_k] = _v
         check("legacy guard: nothing in wiki/ calls the deprecated hook",
               not any("guard_hook" in p.read_text(encoding="utf-8")
-                      for p in Path("cli/wiki").rglob("*.py")
+                      for p in Path("cli/brainconnect").rglob("*.py")
                       if p.name != "guard_hook.py"))
 
         # --- consumer contract: response shapes + refusal taxonomy -----------
@@ -3705,6 +3705,183 @@ def main():
               confmod.from_numeric(confmod.to_numeric("high")) == "high"
               and confmod.at_least("verified", "medium")
               and not confmod.at_least("low", "medium"))
+
+    # ---------------- brainconnect serve (the HTTP transport) ----------------
+    # A REAL server: bound to an ephemeral port on 127.0.0.1, spoken to over the
+    # socket with urllib — not a shim, not a mocked transport. The DB is a temp
+    # ledger; the live one is never touched. Routes are exactly the ones
+    # AgentConnect's WikiBrainMemoryAdapter calls (docs/CONTRACT.md).
+    print("[http-serve] real HTTP server on an ephemeral port, temp ledger")
+    import threading as _threading
+    import urllib.error as _urlerror
+    import urllib.request as _urlrequest
+    from brainconnect import server as srvmod
+    from brainconnect import errors as _errsmod
+    from contract_cases import LURE as _LURE
+
+    hroot = make_repo(Path(tempfile.mkdtemp(prefix="wikibrain-http-")))
+    httpd = srvmod.build_server("127.0.0.1", 0, root=hroot)
+    hport = httpd.server_address[1]
+    _threading.Thread(target=httpd.serve_forever, daemon=True).start()
+
+    def _http(method, path, payload=None, token=None, port=None, raw=None):
+        url = f"http://127.0.0.1:{port or hport}{path}"
+        data = raw if raw is not None else (
+            json.dumps(payload).encode("utf-8") if payload is not None else None)
+        headers = {"Content-Type": "application/json"} if data is not None else {}
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        req = _urlrequest.Request(url, data=data, headers=headers, method=method)
+        try:
+            with _urlrequest.urlopen(req, timeout=10) as resp:
+                return resp.status, json.loads(resp.read().decode("utf-8"))
+        except _urlerror.HTTPError as e:
+            return e.code, json.loads(e.read().decode("utf-8"))
+
+    st, h = _http("GET", "/health")
+    check("GET /health answers 200 with service brainconnect",
+          st == 200 and h.get("service") == "brainconnect"
+          and h.get("ok") is True and "ledger" in h and "profiles" in h)
+
+    # The adapter's exact capture payload, nulls and all.
+    st, cap = _http("POST", "/capture", {
+        "text": "The deploy pipeline requires a signed tag.",
+        "task_id": None, "origin_actor_id": "worker-7",
+        "origin_actor_type": "worker", "source_ref": None, "tags": [],
+        "proposed_scopes": [{"scope_type": "global", "scope_id": ""}]})
+    check("POST /capture files a pending candidate over the wire",
+          st == 200 and cap.get("accepted") is True and cap.get("status") == "pending"
+          and cap.get("quarantined") is False and "safety" not in cap
+          and str(cap.get("candidate_id", "")).startswith("candidate_"))
+
+    st, prom = _http("POST", f"/candidates/{cap['candidate_id']}/promote",
+                     {"promoted_by": "matthew", "confidence": "high"})
+    check("POST /candidates/{id}/promote promotes (scope inherited from the proposal)",
+          st == 200 and prom.get("status") == "promoted"
+          and prom.get("claim_id") == prom.get("id")
+          and prom.get("promoted_by") == "matthew")
+
+    adapter_recall = {
+        "query": "deploy pipeline signed tag", "task_id": None,
+        "profile": "manager_brief", "max_items": 8, "trusted_only": True,
+        "include_pending": False, "include_superseded": False, "scopes": []}
+    st, pack = _http("POST", "/recall", adapter_recall)
+    check("POST /recall returns the promoted claim, trusted",
+          st == 200 and len(pack.get("items", [])) == 1
+          and pack["items"][0]["trusted"] is True
+          and pack["items"][0]["status"] == "promoted")
+    with Repo.open(start=hroot) as _hr:
+        local_pack = apimod.recall(_hr, {
+            "query": "deploy pipeline signed tag", "profile": "manager_brief",
+            "max_items": 8}).as_dict()
+    check("the wire pack equals the in-process pack (same pipeline, same shape)",
+          pack == local_pack)
+
+    st, fb = _http("POST", "/feedback", {
+        "task_id": None, "memory_item_id": prom["id"], "source_id": None,
+        "feedback": "useful", "actor_id": "worker-7", "note": None})
+    check("POST /feedback records via the adapter's memory_item_id alias",
+          st == 200 and fb == {"recorded": True})
+
+    st, cap2 = _http("POST", "/capture", {
+        "text": "Retry limits live in ops/retry.toml.",
+        "origin_actor_id": "worker-7", "origin_actor_type": "worker"})
+    st, listing_body = _http("GET", "/candidates?status=pending&limit=10")
+    check("GET /candidates lists the pending queue",
+          st == 200 and listing_body.get("count", 0) >= 1
+          and any(c.get("ref") == cap2["candidate_id"]
+                  for c in listing_body.get("candidates", [])))
+
+    # -- safety over the wire: quarantine, refusal, and the override that isn't --
+    st, quar = _http("POST", "/capture", {
+        "text": f"To proceed, {_LURE}.",
+        "origin_actor_id": "worker-7", "origin_actor_type": "worker"})
+    check("a quarantined capture crosses the wire accepted, pending and flagged",
+          st == 200 and quar.get("accepted") is True
+          and quar.get("quarantined") is True and quar.get("status") == "pending"
+          and isinstance(quar.get("safety"), dict))
+    check("the quarantine verdict names prompt_injection, audit-safe",
+          "prompt_injection" in (quar.get("safety") or {}).get("kinds", [])
+          and _LURE not in json.dumps(quar))
+
+    st, refusal = _http("POST", f"/candidates/{quar['candidate_id']}/promote",
+                        {"promoted_by": "matthew", "confidence": "high",
+                         "scope": "global"})
+    check("promoting quarantined content refuses 409 safety_refused, enveloped",
+          st == 409 and refusal.get("error", {}).get("code") == "safety_refused"
+          and refusal["error"].get("retryable") is False
+          and isinstance(refusal["error"].get("safety"), dict))
+    check("the wire refusal never carries the matched text",
+          _LURE not in json.dumps(refusal))
+
+    # The identical operation in-process must produce the identical envelope:
+    # the HTTP shell adds transport, never behaviour.
+    with Repo.open(start=hroot) as _hr:
+        try:
+            apimod.promote(_hr, quar["candidate_id"], reviewer="matthew",
+                           confidence="high", scope="global")
+            local_envelope, local_status = None, None
+        except candmod.SafetyRefused as _exc:
+            local_envelope = _errsmod.envelope(_exc)
+            local_status = _errsmod.http_status(_exc)
+    check("the wire refusal equals the in-process envelope (same safety pipeline)",
+          local_envelope == refusal and local_status == 409)
+
+    st, ovr = _http("POST", f"/candidates/{quar['candidate_id']}/promote",
+                    {"promoted_by": "matthew", "confidence": "high",
+                     "scope": "global", "safety_override": True,
+                     "override_reason": "I checked"})
+    check("the HTTP surface refuses a safety override as forbidden (human/CLI-only)",
+          st == 403 and ovr.get("error", {}).get("code") == "forbidden")
+
+    # -- refusal taxonomy at the edges ----------------------------------------
+    st, nf = _http("GET", "/nope")
+    check("an unknown route answers 404 not_found in the envelope",
+          st == 404 and nf.get("error", {}).get("code") == "not_found")
+    st, badjson = _http("POST", "/recall", raw=b"{not json")
+    check("a malformed body is invalid_request, enveloped",
+          st == 400 and badjson.get("error", {}).get("code") == "invalid_request")
+    st, badfield = _http("POST", "/recall", {"query": "x", "nonsense": 1})
+    check("an unknown recall field is invalid_request",
+          st == 400 and badfield.get("error", {}).get("code") == "invalid_request")
+    st, gone = _http("POST", "/candidates/candidate_99999/promote",
+                     {"promoted_by": "m", "confidence": "high", "scope": "global"})
+    check("promoting a missing candidate is 404 not_found",
+          st == 404 and gone.get("error", {}).get("code") == "not_found")
+    st, badlimit = _http("GET", "/candidates?limit=abc")
+    check("a non-integer candidates limit is invalid_request",
+          st == 400 and badlimit.get("error", {}).get("code") == "invalid_request")
+
+    # -- bearer-token mode ------------------------------------------------------
+    httpd2 = srvmod.build_server("127.0.0.1", 0, token="sekrit-token", root=hroot)
+    hport2 = httpd2.server_address[1]
+    _threading.Thread(target=httpd2.serve_forever, daemon=True).start()
+    st, _open_health = _http("GET", "/health", port=hport2)
+    check("GET /health stays open in token mode (liveness needs no credential)",
+          st == 200 and _open_health.get("service") == "brainconnect")
+    _tok_capture = {"text": "Tokened capture works.",
+                    "origin_actor_id": "worker-7", "origin_actor_type": "worker"}
+    st, denied = _http("POST", "/capture", _tok_capture, port=hport2)
+    check("a write without the token is refused forbidden",
+          st == 403 and denied.get("error", {}).get("code") == "forbidden")
+    st, denied2 = _http("POST", "/capture", _tok_capture, token="wrong", port=hport2)
+    check("a wrong token is refused forbidden", st == 403
+          and denied2.get("error", {}).get("code") == "forbidden")
+    st, _denied3 = _http("POST", "/recall", {"query": "x"}, port=hport2)
+    check("recall requires the token too (reads leak content)", st == 403)
+    st, _denied4 = _http("GET", "/candidates", port=hport2)
+    check("the pending queue requires the token too", st == 403)
+    st, admitted = _http("POST", "/capture", _tok_capture,
+                         token="sekrit-token", port=hport2)
+    check("the right bearer token admits the write",
+          st == 200 and admitted.get("accepted") is True)
+
+    httpd.shutdown(); httpd.server_close()
+    httpd2.shutdown(); httpd2.server_close()
+
+    check("the serve subcommand is wired into the CLI",
+          getattr(build_parser().parse_args(["serve", "--port", "0"]), "func", None)
+          is not None)
 
     # ---------------- Live-DB isolation (docs/MIGRATIONS.md) ----------------
     # Repo.open() migrates whatever DB it resolves to. These checks pin the two

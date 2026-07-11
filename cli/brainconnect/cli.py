@@ -1,9 +1,10 @@
-"""`wiki` command-line entry point. Pure code — zero model calls (§1)."""
+"""`brainconnect` command-line entry point. Pure code — zero model calls (§1)."""
 from __future__ import annotations
 
 import argparse
 import getpass
 import json
+import os
 import subprocess
 import sys
 
@@ -18,6 +19,7 @@ from . import (api as apimod, backends, candidates as candmod,
                confidence as confmod, feedback as feedbackmod,
                profiles as profilesmod, refs, safety as safetymod,
                scopes as scopesmod)
+from . import server as servermod
 
 # Ledger errors that are a user mistake at the terminal, not a bug: print the
 # message and exit non-zero rather than dumping a traceback.
@@ -934,6 +936,14 @@ def cmd_mcp(args):
                   + ("." if read_only else " plus brain_capture (gated write)."))
 
 
+def cmd_serve(args):
+    token = (args.token or os.environ.get(servermod.TOKEN_ENV_VAR, "")).strip() or None
+    try:
+        servermod.serve(args.host, args.port, token=token)
+    except OSError as e:
+        sys.exit(f"error: could not bind {args.host}:{args.port} ({e})")
+
+
 # --- parser -----------------------------------------------------------------
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="brainconnect", description="BrainConnect CLI (no model calls)")
@@ -1234,6 +1244,18 @@ def build_parser() -> argparse.ArgumentParser:
     sk.set_defaults(func=cmd_skill)
 
     # mcp: expose the brain as an MCP server (Phase 7)
+    ssv = sub.add_parser(
+        "serve",
+        help="serve the memory ledger over HTTP (AgentConnect's adapter routes)")
+    ssv.add_argument("--host", default=servermod.DEFAULT_HOST,
+                     help=f"bind address (default {servermod.DEFAULT_HOST})")
+    ssv.add_argument("--port", type=int, default=servermod.DEFAULT_PORT,
+                     help=f"port (default {servermod.DEFAULT_PORT})")
+    ssv.add_argument("--token", default="",
+                     help="require this bearer token on every route except GET "
+                          f"/health (or set {servermod.TOKEN_ENV_VAR})")
+    ssv.set_defaults(func=cmd_serve)
+
     smc = sub.add_parser("mcp", help="serve the brain over MCP (query door)")
     mcsub = smc.add_subparsers(dest="mcmd", required=True)
     mcserve = mcsub.add_parser("serve", help="run the stdio MCP server")
