@@ -4095,8 +4095,185 @@ def main():
     # ---------------- OKF round-trip + interop fidelity (Stage 4) -------------
     _okf_roundtrip_checks()
 
+    # ---------------- Capability registry (ADR 0008 Lane 1) ------------------
+    _registry_checks()
+
     print(f"\nRESULT: {PASS} passed, {FAIL} failed")
     sys.exit(1 if FAIL else 0)
+
+
+def _registry_checks():
+    """The trusted model/worker capability registry (ADR 0008 Lane 1).
+
+    Seeded tiers present + ordered; preferred vs deployed distinction correct; NO
+    performance numbers on the preferred model; an agent/worker CANNOT self-promote
+    a capability claim; the query is deterministic; the model_performance profile +
+    model scope confine the claims exactly as the ledger already does.
+    """
+    print("[registry] capability registry: tiers, preferred/deployed, human-only promotion")
+    import re as _re
+    from brainconnect import registry as regmod
+    from brainconnect import api as apimod, candidates as candmod
+    from brainconnect.db import Repo
+
+    rroot = make_repo(Path(tempfile.mkdtemp(prefix="wikibrain-registry-")))
+
+    # -- the registry is DATA-DRIVEN: the tier hierarchy is a seed structure -----
+    order = regmod.tier_order()
+    check("registry: tier hierarchy is small -> general-doc -> "
+          "high-capability-local -> frontier-managers, ordered by ordinal",
+          [t.name for t in order]
+          == ["small", "general-doc", "high-capability-local", "frontier-managers"]
+          and [t.ordinal for t in order] == [1, 2, 3, 4])
+    check("registry: each tier carries required_capabilities + a provider binding",
+          all(t.required_capabilities and t.provider for t in order))
+    # The declared preferred model is read from DATA, never a hard-coded constant.
+    check("registry: Qwen3.6-35B-A3B is the DECLARED preferred high-capability-local "
+          "model (from the seed data, swappable without code change)",
+          regmod.preferred_model("high-capability-local") == "Qwen3.6-35B-A3B")
+    check("registry: qwen3-30b-a3b is the DEPLOYED model for that tier "
+          "(preferred != deployed)",
+          regmod.deployed_model("high-capability-local") == "qwen3-30b-a3b"
+          and regmod.preferred_model("high-capability-local")
+          != regmod.deployed_model("high-capability-local"))
+    check("registry: only the high-capability-local tier names a preferred/deployed "
+          "model; the others declare none",
+          [t.name for t in order if t.preferred_model or t.deployed_model]
+          == ["high-capability-local"])
+
+    # -- seeding files PENDING candidates only (never promotes) ------------------
+    with Repo.open(start=rroot) as r:
+        created = regmod.seed(r)
+    check("registry: seeding files exactly 6 facts (4 tiers + preferred + deployed)",
+          len(created) == 6 and all(ref.startswith("candidate_") for ref in created))
+    with Repo.open(start=rroot) as r:
+        n_cand = r.one("SELECT COUNT(*) n FROM memory_candidates")["n"]
+        n_claim = r.one("SELECT COUNT(*) n FROM claims")["n"]
+    check("registry: every seeded fact enters as a PENDING candidate, NOTHING is "
+          "auto-promoted (no claims exist yet)",
+          n_cand == 6 and n_claim == 0)
+    # Seeding is idempotent: a second seed against the same ledger creates nothing.
+    with Repo.open(start=rroot) as r:
+        again = regmod.seed(r)
+    check("registry: re-seeding is idempotent (no duplicate candidates)", again == [])
+
+    # -- the seeded model facts are model-performance-profiled, model-scoped ------
+    with Repo.open(start=rroot) as r:
+        snap0 = regmod.snapshot(r)
+    hcl0 = next(t for t in snap0["tiers"] if t["tier"] == "high-capability-local")
+    check("registry: the preferred model fact is model-scoped (model:Qwen3.6-35B-A3B)",
+          hcl0["preferred_model"]["scope"] == "model:Qwen3.6-35B-A3B")
+    check("registry: the deployed model fact is model-scoped (model:qwen3-30b-a3b)",
+          hcl0["deployed_model"]["scope"] == "model:qwen3-30b-a3b")
+
+    # -- NO performance numbers on the preferred model ---------------------------
+    with Repo.open(start=rroot) as r:
+        pref_ref = hcl0["preferred_model"]["ref"]
+        pref_cand = candmod.get(r, refsmod.parse(pref_ref, refsmod.CANDIDATE))
+    check("registry: the preferred-model fact carries the model-performance tag "
+          "(binds it to the §7 model_performance profile)",
+          "model-performance" in pref_cand["tags"])
+    # The declared preference must NOT smuggle a fabricated benchmark. The text
+    # explicitly disclaims measurement; the only digits present are the model's own
+    # name (Qwen3.6-35B-A3B), never a metric.
+    disclaimer = "no benchmark numbers have been measured"
+    text_wo_name = pref_cand["text"].replace("Qwen3.6-35B-A3B", "")
+    check("registry: the preferred-model fact explicitly declares NO measured "
+          "benchmark numbers",
+          disclaimer in pref_cand["text"])
+    check("registry: no benchmark-like number is attached to the preferred model "
+          "(the only digits are inside the model name)",
+          not _re.search(r"\d", text_wo_name))
+    check("registry: the preferred-model registry entry carries no metric field of "
+          "any kind (identity + trust status only)",
+          set(hcl0["preferred_model"]) == {"model", "role", "scope", "state", "ref",
+                                            "status", "promoted", "trusted"})
+
+    # -- an agent / worker CANNOT self-promote a capability claim -----------------
+    check("registry: a WORKER principal cannot self-promote a capability claim",
+          _raises(candmod.ReviewerNotPermitted, _promote_registry,
+                  rroot, pref_ref, "worker"))
+    check("registry: an AGENT principal cannot self-promote a capability claim",
+          _raises(candmod.ReviewerNotPermitted, _promote_registry,
+                  rroot, pref_ref, "agent"))
+    # ...and no seeded model fact was promoted as a side effect of the attempts.
+    with Repo.open(start=rroot) as r:
+        check("registry: the refused self-promotions left ZERO promoted claims",
+              r.one("SELECT COUNT(*) n FROM claims")["n"] == 0)
+
+    # -- a HUMAN can promote it; it then reads as promoted + trusted --------------
+    with Repo.open(start=rroot) as r:
+        apimod.promote(r, pref_ref, reviewer="matthew", confidence="high",
+                       scope="model:Qwen3.6-35B-A3B", reviewer_type="human")
+        snap1 = regmod.snapshot(r)
+    hcl1 = next(t for t in snap1["tiers"] if t["tier"] == "high-capability-local")
+    check("registry: after human promotion the preferred model reads promoted + "
+          "trusted, while the deployed model stays pending (distinction preserved)",
+          hcl1["preferred_model"]["status"] == "promoted"
+          and hcl1["preferred_model"]["trusted"] is True
+          and hcl1["deployed_model"]["status"] == "pending")
+
+    # -- the promoted claim surfaces under the model_performance profile ----------
+    with Repo.open(start=rroot) as r:
+        pack = apimod.recall(r, {"query": "preferred model", "profile": "model_performance",
+                                 "scopes": ["model:Qwen3.6-35B-A3B"]})
+        # ...and is correctly confined OUT of manager_brief (model scope excluded).
+        mgr = apimod.recall(r, {"query": "preferred model", "profile": "manager_brief"})
+    check("registry: the promoted capability claim is retrievable via the §7 "
+          "model_performance profile at model scope",
+          len(pack.items) == 1 and pack.items[0].id == hcl1["preferred_model"]["ref"])
+    check("registry: the model-scoped capability claim does NOT leak into a "
+          "manager_brief recall (scope confinement holds)",
+          all(it.id != hcl1["preferred_model"]["ref"] for it in mgr.items))
+
+    # -- the read/query surface is deterministic ---------------------------------
+    with Repo.open(start=rroot) as r:
+        a = regmod.snapshot(r)
+        b = regmod.snapshot(r)
+    check("registry: snapshot() is deterministic (two reads are byte-identical)",
+          json.dumps(a, sort_keys=True) == json.dumps(b, sort_keys=True))
+    check("registry: snapshot tiers come back in canonical ordinal order",
+          [t["ordinal"] for t in a["tiers"]] == [1, 2, 3, 4])
+
+    # -- the CLI read surface exists and honours --json --------------------------
+    from brainconnect import cli as _cli
+
+    def _exit(argv):
+        try:
+            _cli.main(argv)
+            return 0
+        except SystemExit as e:
+            return e.code or 0
+
+    _prev = os.getcwd()
+    os.chdir(rroot)
+    _out = Path(rroot) / "reg.json"
+    try:
+        import contextlib as _ctx
+        with open(_out, "w", encoding="utf-8") as fh, _ctx.redirect_stdout(fh):
+            code = _exit(["registry", "list", "--json"])
+    finally:
+        os.chdir(_prev)
+    cli_doc = json.loads(_out.read_text(encoding="utf-8")) if _out.is_file() else {}
+    check("registry CLI: `registry list --json` exits 0 and emits the tier list "
+          "with the declared preferred high-capability-local model",
+          code == 0
+          and cli_doc.get("preferred_high_capability_local") == "Qwen3.6-35B-A3B"
+          and [t["tier"] for t in cli_doc.get("tiers", [])]
+          == ["small", "general-doc", "high-capability-local", "frontier-managers"])
+
+
+def _promote_registry(root, ref, reviewer_type):
+    """Attempt to promote a seeded registry candidate as `reviewer_type`.
+
+    A helper so the self-promotion negative checks stay one-liners. It opens its
+    own Repo so a raised `ReviewerNotPermitted` cannot leave a half-open write.
+    """
+    from brainconnect import api as apimod
+    from brainconnect.db import Repo
+    with Repo.open(start=root) as r:
+        apimod.promote(r, ref, reviewer="self", confidence="high",
+                       scope="model:Qwen3.6-35B-A3B", reviewer_type=reviewer_type)
 
 
 def _hardening_checks():

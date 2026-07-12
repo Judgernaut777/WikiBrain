@@ -16,7 +16,7 @@ everywhere.
 
 | Lane | Capability | Ownership | Owner | First deliverable | Depends on |
 |---|---|---|---|---|---|
-| 1 | Capability registry + tier hierarchy (small → general-doc → high-capability-local → frontier-managers) + preferred-model declaration | **A** (trusted registry) + **B** (runtime tiers to AC/CC) | BC | Capability-claim schema bound to LEDGER_SPEC §7 `model_performance` + §5.5 `model:`/`worker:` scope, seeded with the tier hierarchy as **metadata** claims. `Qwen3.6-35B-A3B` recorded as the *declared preferred* high-capability local tier (no numbers); `qwen3-30b-a3b` as the *deployed* tier. Human/librarian-only promotion. **No benchmark numbers.** | none (foundation) |
+| 1 | Capability registry + tier hierarchy (small → general-doc → high-capability-local → frontier-managers) + preferred-model declaration | **A** (trusted registry) + **B** (runtime tiers to AC/CC) | BC | ✅ **done** — `cli/brainconnect/registry.py` + `brainconnect registry` CLI + [REGISTRY.md](REGISTRY.md). Capability facts are ordinary claims bound to LEDGER_SPEC §7 `model_performance` + §5.5 `model:`/`worker:` scope; the tier hierarchy is a **data-driven** seed (no code branches on tier name). `Qwen3.6-35B-A3B` recorded as the *declared preferred* high-capability-local model (no numbers, not a required dependency); `qwen3-30b-a3b` as the *deployed* model. Seeding files **pending** candidates only; promotion is human/librarian-only (no auto-promote path). **No benchmark numbers.** | none (foundation) |
 | 2 | Published Decima capability-reasoning read-contract (planning/approvals/workspaces/knowledge/agents/artifacts) | **B** (surface lives in Decima) | Decima (BC consumes) | A versioned read-contract *in the Decima repo* stabilizing `projections.{tasks,approvals,agents,knowledge,activity}` with `instruction_eligible` exposed. BC codes against the contract, not Python objects. | none (parallel to L1) |
 | 3 | Transport for the registry (BC↔AC/CC memory link, `:8787`) | **A** (claim endpoint) + **B** (consumption) | BC + AC | Wire LEDGER_SPEC §14.3 `:8787` so AC's `RoutingEngine` can pull BC *trusted* capability claims as a routing input (a trusted source instead of self-conferred `learned_quality`). BC serves read-only trusted claims; AC weights them. | L1 |
 | 4 | Capability router + warm-aware swap-minimizing scheduler | **B** (fully) | AC (routing/residency) + CC (placement) | A thin BC delegation trigger that assembles a request from trusted claims + knowledge context, calls AC `RoutingEngine.route` and CC `/route/estimate`, and records the returned decision + rationale as trusted provenance. **Zero routing/placement math in BC.** | L3, L2 |
@@ -65,4 +65,10 @@ everywhere.
 ## Status
 
 - **Lane 0 (boundary ADR):** ✅ complete — ADR 0008 accepted.
-- **Lanes 1–8:** planned. Lane 1 is the unblocked foundation and is next.
+- **Lane 1 (capability registry + tier hierarchy):** ✅ complete — trusted,
+  human-gated, `model_performance`-scoped registry with the data-driven tier
+  hierarchy and the declared-preferred/deployed model distinction. See
+  [REGISTRY.md](REGISTRY.md); code in `cli/brainconnect/registry.py`, read surface
+  `brainconnect registry list`.
+- **Lanes 2–8:** planned. Lane 3 (the `:8787` transport that lets AC pull trusted
+  claims) is the next unblocked step now that the registry exists.

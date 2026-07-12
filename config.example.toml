@@ -172,6 +172,10 @@ model = "qwen3:14b"
 # high-volume extract/triage; on a high-RAM box a small-active MoE (e.g. a
 # 35B-A3B — 35B weights but only ~3B active per token) gives near-large-model
 # adjudication at CPU-friendly speed. See README "Run entirely on CPU".
+# For the high-capability-local recommendation the CAPABILITY REGISTRY is now the
+# canonical source (docs/REGISTRY.md): run `brainconnect registry list` to see the
+# declared preferred model and the currently-deployed one for that tier, rather
+# than pinning a model name here. The names below are only illustrative examples.
 # base_url    = "http://localhost:8080/v1"   # llama.cpp `-m qwen3.5-4b.gguf --host 0.0.0.0`
 # api_key_env = ""                            # local server, no key
 # model       = "qwen3.5:4b"

@@ -18,8 +18,8 @@ from . import (ingest, search as searchmod, queue as queuemod, render as renderm
                evidence as evidencemod, triage as triagemod)
 from . import (api as apimod, backends, candidates as candmod,
                confidence as confmod, feedback as feedbackmod,
-               profiles as profilesmod, refs, safety as safetymod,
-               scopes as scopesmod)
+               profiles as profilesmod, refs, registry as registrymod,
+               safety as safetymod, scopes as scopesmod)
 from . import server as servermod
 from . import backup as backupmod
 
@@ -885,6 +885,10 @@ def cmd_project(args):
 def cmd_ledger_health(args):
     with Repo.open() as repo:
         h = apimod.health(repo)
+        # Surface the declared preferred high-capability-local model by READING the
+        # registry data (ADR 0008 Lane 1) — never a hard-coded constant. The trust
+        # status is read from the ledger alongside it.
+        snap = registrymod.snapshot(repo)
     if _emit(h, getattr(args, "json", False)):
         return
     print(f"{h['service']}: {h['role']} — schema v{h['schema_version']}")
@@ -892,6 +896,55 @@ def cmd_ledger_health(args):
           f"(ok={h['backend'].get('ok')}, {h['backend'].get('note', '')})")
     for k, v in h["ledger"].items():
         print(f"  {k:22s} {v}")
+    pref = snap["preferred_high_capability_local"]
+    hcl = next((t for t in snap["tiers"]
+                if t["tier"] == registrymod.HIGH_CAPABILITY_LOCAL), None)
+    pref_status = hcl["preferred_model"]["status"] if hcl and hcl["preferred_model"] else "absent"
+    print(f"  {'preferred hi-cap model':22s} {pref} [{pref_status}] "
+          f"(source: `brainconnect registry list`)")
+
+
+def cmd_registry(args):
+    """The trusted model/worker capability registry (ADR 0008 Lane 1)."""
+    with Repo.open() as repo:
+        rcmd = getattr(args, "rcmd", None)
+        if rcmd == "seed":
+            try:
+                created = registrymod.seed(
+                    repo, proposed_by=args.by, proposed_by_type=args.by_type)
+            except (registrymod.RegistryError,) + _LEDGER_ERRORS as e:
+                sys.exit(f"error: {e}")
+            if _emit({"created": created}, args.json):
+                return
+            if not created:
+                print("registry: already seeded — no new capability candidates filed")
+                return
+            print(f"registry: filed {len(created)} PENDING capability candidate(s):")
+            for ref in created:
+                print(f"  {ref}")
+            print("promote them (human-gated) with "
+                  "`brainconnect promote <ref> --scope <scope> --confidence <label>`; "
+                  "an agent/model can never self-promote a capability claim.")
+            return
+        # default (rcmd is None or "list"): the deterministic read surface.
+        snap = registrymod.snapshot(repo)
+    if _emit(snap, args.json):
+        return
+    print(f"capability tiers (declared preferred high-capability-local model: "
+          f"{snap['preferred_high_capability_local']}):")
+    for t in snap["tiers"]:
+        print(f"  [{t['ordinal']}] {t['tier']}  provider={t['provider']}  "
+              f"caps={', '.join(t['required_capabilities'])}")
+        m = t["metadata_claim"]
+        print(f"      tier metadata   : {m['status']} ({m['ref'] or '—'})")
+        for label, entry in (("preferred", t["preferred_model"]),
+                             ("deployed ", t["deployed_model"])):
+            if entry is None:
+                continue
+            trust = "trusted" if entry["trusted"] else "not-trusted"
+            print(f"      {label} model : {entry['model']} "
+                  f"[{entry['status']}/{trust}] ({entry['ref'] or '—'}) "
+                  f"scope={entry['scope']}")
 
 
 def cmd_promote_summary(args):
@@ -1403,6 +1456,25 @@ def build_parser() -> argparse.ArgumentParser:
     slh = sub.add_parser("ledger-health",
                          help="the §14 adapter health check (backend + ledger shape)")
     addj(slh); slh.set_defaults(func=cmd_ledger_health)
+
+    # registry: the trusted model/worker capability registry (ADR 0008 Lane 1).
+    srg = sub.add_parser(
+        "registry",
+        help="the trusted model/worker capability registry: tiers + preferred/"
+             "deployed model per tier + claim status (ADR 0008 Lane 1)")
+    rgsub = srg.add_subparsers(dest="rcmd")
+    rgl = rgsub.add_parser(
+        "list", help="tiers (ordered) + preferred/deployed model + claim status")
+    addj(rgl); rgl.set_defaults(func=cmd_registry)
+    rgs = rgsub.add_parser(
+        "seed", help="file the tier hierarchy as PENDING candidates (human promotes; "
+                     "never auto-promoted)")
+    rgs.add_argument("--by", default="registry-seed", help="who is proposing the seed")
+    rgs.add_argument("--by-type", dest="by_type", default="tool",
+                     choices=candmod.PROPOSER_TYPES,
+                     help="proposer type (a proposer, never a promoter)")
+    addj(rgs); rgs.set_defaults(func=cmd_registry)
+    addj(srg); srg.set_defaults(func=cmd_registry, rcmd=None)
 
     sub.add_parser("dump").set_defaults(func=cmd_dump)
 
