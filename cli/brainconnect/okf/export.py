@@ -34,7 +34,7 @@ import shutil
 from pathlib import Path
 
 from ..db import Repo
-from .. import confidence as conf, refs, safety, scopes as scopesmod
+from .. import confidence as conf, refs, safety, scopes as scopesmod, trust
 from ..scopes import Scope
 from . import yamlfmt
 from .model import ExportRequest, ExportResult
@@ -93,7 +93,8 @@ def _select_claims(repo: Repo, req: ExportRequest, contradicted: dict[int, set[i
         if req.scopes and not scopesmod.matches(claim_scope, req.scopes):
             continue
         if req.trusted_only:
-            trusted = status == "promoted" and row["id"] not in contradicted
+            trusted = trust.is_trusted(
+                status=status, contradicted=row["id"] in contradicted)
             if not trusted:
                 continue
         out.append(row)
@@ -174,7 +175,7 @@ def _claim_doc(repo: Repo, row, *, contradicted: dict[int, set[int]],
     ref = refs.claim(cid)
     status = row["status"]
     is_contradicted = cid in contradicted
-    trusted = status == "promoted" and not is_contradicted
+    trusted = trust.is_trusted(status=status, contradicted=is_contradicted)
 
     # Safety on the way out: the recall output policy, applied to the body.
     verdict = safety.scan_for(repo, row["text"], safety.MEMORY_RECALL)
@@ -280,7 +281,8 @@ def _index_doc(req: ExportRequest, claim_rows, exported_ids: set[int],
     lines.append("\n## Claims\n")
     for row in claim_rows:
         ref = refs.claim(row["id"])
-        trusted = row["status"] == "promoted" and row["id"] not in contradicted
+        trusted = trust.is_trusted(
+            status=row["status"], contradicted=row["id"] in contradicted)
         flag = "trusted" if trusted else f"{row['status']}, UNTRUSTED"
         lines.append(f"- [{ref}](claims/{ref}.md) — {flag}\n")
         links.append(f"claims/{ref}.md")

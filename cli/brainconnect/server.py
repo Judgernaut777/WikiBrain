@@ -13,7 +13,7 @@ and nothing else:
     GET  /registry/capabilities      -> alias of GET /registry
     GET  /health                     -> api.health
 
-The ``/registry`` route is the ADR-0008 Lane-3 transport (docs/REGISTRY.md §7): a
+The ``/registry`` route is the ADR-0008 Lane-3 transport (docs/REGISTRY.md §6): a
 READ-ONLY view of the capability registry restricted to TRUSTED, human-promoted
 claims, which AgentConnect's ``RoutingEngine`` PULLS to weight a trusted source in
 place of its self-conferred ``learned_quality``. BC serves only trusted claims; how
@@ -38,6 +38,16 @@ Everything of consequence is a property of the API layer, not of this file:
   compared constant-time). A missing or wrong credential is ``forbidden`` —
   which AgentConnect's adapter surfaces as ``MemoryAuthorizationError``, the
   "never retry with the same credential" class.
+
+  **Tokenless serve is UNAUTHENTICATED and MUST stay on loopback.** With no token
+  configured, auth is off and EVERY non-health route is open to any caller that
+  can reach the socket — including ``GET /registry``, which then publishes the
+  trusted capability claims with no credential check at all. The default bind is
+  ``127.0.0.1`` for exactly this reason: a tokenless ``brainconnect serve`` must
+  never be bound to a non-loopback address or otherwise exposed beyond
+  ``127.0.0.1``. Configure ``BRAINCONNECT_TOKEN`` before binding anywhere else.
+  (The auth default is intentionally left as-is here — consistent with every
+  other route — and is a deployment obligation, not a code toggle.)
 * **Zero model calls.** Pure stdlib: ``http.server`` + a fresh ``Repo`` per
   request (WAL-safe, same pattern as the MCP server), so no third-party web
   framework enters the trust boundary.

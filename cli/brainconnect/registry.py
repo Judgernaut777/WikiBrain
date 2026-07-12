@@ -40,7 +40,7 @@ import warnings
 from dataclasses import dataclass
 
 from .db import Repo
-from . import candidates, refs
+from . import candidates, refs, trust
 from .scopes import Scope, GLOBAL
 
 # The classification tag that binds a *model* capability fact (preferred/deployed,
@@ -285,13 +285,14 @@ def _status_for(repo: Repo, key: str) -> dict:
             "SELECT id, status FROM claims WHERE id = ?", (cand["promoted_claim_id"],))
         if claim is not None:
             promoted = claim["status"] == "promoted"
-            trusted = False
+            contradicted = False
             if promoted:
                 disputed = repo.one(
                     "SELECT 1 AS x FROM contradictions "
                     "WHERE status='open' AND (claim_a=? OR claim_b=?) LIMIT 1",
                     (claim["id"], claim["id"]))
-                trusted = disputed is None
+                contradicted = disputed is not None
+            trusted = trust.is_trusted(status=claim["status"], contradicted=contradicted)
             return {"state": "claim", "ref": refs.claim(claim["id"]),
                     "status": claim["status"], "promoted": promoted,
                     "trusted": trusted}

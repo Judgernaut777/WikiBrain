@@ -151,7 +151,7 @@ brainconnect promote candidate_N \          # human-gated promotion (never an ag
   --scope model:Qwen3.6-35B-A3B --confidence high
 ```
 
-## 7. Serving trusted claims over `:8787` (ADR 0008 Lane 3)
+## 6. Serving trusted claims over `:8787` (ADR 0008 Lane 3)
 
 The registry's trusted claims are served to AgentConnect over the existing
 `brainconnect serve` HTTP surface (`cli/brainconnect/server.py`, default
@@ -174,6 +174,14 @@ Properties (all enforced in `registry.trusted_view` + `tests/acceptance.py`):
 - **Bearer-authed exactly like every other route.** When a token is configured, a
   missing/wrong credential is refused `forbidden` (`403`); only `GET /health` stays
   open. It reuses the server's one auth path — there is no route-specific auth.
+  **A tokenless `brainconnect serve` is UNAUTHENTICATED:** with no `--token` /
+  `BRAINCONNECT_TOKEN` set, auth is off and every non-health route — now including
+  `GET /registry`, which then serves the trusted capability claims to any caller
+  that can reach the socket — is open. This is why the server binds `127.0.0.1` by
+  default: a tokenless serve MUST stay on loopback and must never be exposed beyond
+  `127.0.0.1`. Set a token before binding anywhere else. (The auth default is
+  intentionally unchanged — consistent with every other route — and is a deployment
+  obligation, not a code toggle.)
 - **Trusted-only.** The payload carries the tier hierarchy STRUCTURE (ordinal,
   required capabilities, provider — data-derived, never squattable) and, per tier,
   the preferred/deployed **model claim only when it is `trusted`** (promoted AND
@@ -194,7 +202,7 @@ The consumption side — AC pulling this endpoint and folding it into
 `RoutingEngine.route` weighting — is **delegated to the AgentConnect repo** (ADR
 0008: BC serves trusted claims, AC decides how to weight them).
 
-## 8. Boundary reminders (ADR 0008, binding)
+## 7. Boundary reminders (ADR 0008, binding)
 
 - Do **not** add routing/placement/scheduling/residency math here. Call
   AgentConnect and ComputeConnect; record the returned decision as provenance

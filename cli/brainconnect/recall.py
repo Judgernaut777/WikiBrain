@@ -22,7 +22,7 @@ import json
 from dataclasses import dataclass, field
 
 from .db import Repo
-from . import backends, confidence as conf, profiles, refs, safety, scopes, util
+from . import backends, confidence as conf, profiles, refs, safety, scopes, trust, util
 from .scopes import Scope
 
 # Statuses that may NEVER appear in a recall pack, under any flag combination. A
@@ -264,7 +264,7 @@ def recall(repo: Repo, req: RecallRequest) -> RecallPack:
         item = RecallItem(
             id=refs.claim(cid), text=row["text"], status=status, confidence=label,
             scope=claim_scope.as_dict(), validity=_validity(row),
-            trusted=(status == "promoted" and not is_contradicted),
+            trusted=trust.is_trusted(status=status, contradicted=is_contradicted),
             tags=tags,
             source_id=refs.source(row["source_id"]),
             sources=_sources_for(repo, cid) if req.include_sources else [],
