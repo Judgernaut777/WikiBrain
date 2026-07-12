@@ -35,7 +35,7 @@ import json
 from dataclasses import dataclass, field
 
 from .db import Repo
-from . import api, ingest, registry
+from . import api, ingest, registry, candidates
 from .delegate_clients import (
     AGENTCONNECT, COMPUTECONNECT, DelegationClientError,
     RoutingClient, EstimateClient,
@@ -78,8 +78,75 @@ _AC_PRIVACY_CLASS: dict[str, str] = {
 }
 
 #: The AgentConnect `RoutingDecision.decision` values that place work OFF the
-#: local box. BC rejects any of these when the privacy floor forbids external.
-_OFFBOX_DECISIONS = frozenset({"route_to_rented_node", "route_to_cloud_provider"})
+#: local box, tagged with WHICH caller ceiling gates each. BC rejects any of these
+#: when the privacy floor forbids external OR the caller ceiling forbids it.
+#:   "paid"   → a cloud provider (gated by allow_paid AND allow_external)
+#:   "rented" → a rented node    (gated by allow_rented AND allow_external)
+_OFFBOX_DECISION_KIND: dict[str, str] = {
+    "route_to_cloud_provider": "paid",
+    "route_to_rented_node": "rented",
+}
+#: Back-compat alias: the set of off-box decision values.
+_OFFBOX_DECISIONS = frozenset(_OFFBOX_DECISION_KIND)
+
+#: ComputeConnect `placement_class` values that indicate an OFF-BOX target, tagged
+#: with the gating ceiling. Only "local"/"local_resident" stay on-box.
+_OFFBOX_PLACEMENT_KIND: dict[str, str] = {
+    "cloud": "paid",
+    "rented": "rented",
+    "external": "external",
+    "remote": "external",
+}
+#: Substrings in a CC estimate's `runtime`/`provider_id` that betray an off-box
+#: (cloud/rented/external) target even if `placement_class` were spoofed to look
+#: local. A secondary, defense-in-depth signal — the local runtime is llama.cpp.
+_OFFBOX_RUNTIME_TOKENS = (
+    "cloud", "rented", "remote", "external", "openai", "anthropic",
+    "azure", "bedrock", "vertex", "gemini", "together", "fireworks",
+    "groq", "mistral-api", "hosted",
+)
+
+
+def _routing_offbox_kind(routing: dict) -> str | None:
+    """Classify an AC `RoutingDecision` as off-box: 'paid' | 'rented' | None."""
+    return _OFFBOX_DECISION_KIND.get(routing.get("decision"))
+
+
+def _estimate_offbox_kind(estimate: dict) -> str | None:
+    """Classify a CC estimate's placement as off-box: 'paid'|'rented'|'external'|None.
+
+    Primary signal is `reason.placement_class`; a `runtime`/`provider_id` that
+    names a cloud/rented/external engine is a secondary signal so a spoofed
+    `placement_class` cannot smuggle privacy-restricted work off-box."""
+    reason = estimate.get("reason")
+    reason = reason if isinstance(reason, dict) else {}
+    pc = str(reason.get("placement_class") or "").strip().lower()
+    kind = _OFFBOX_PLACEMENT_KIND.get(pc)
+    if kind is not None:
+        return kind
+    hint = " ".join(str(v or "").lower() for v in (
+        estimate.get("runtime"), reason.get("provider_id"),
+        reason.get("provider"), reason.get("runtime")))
+    if any(tok in hint for tok in _OFFBOX_RUNTIME_TOKENS):
+        return "external"
+    return None
+
+
+def _offbox_rejection(kind: str | None, priv: dict, ceilings: dict) -> str | None:
+    """Return a rejection reason if an off-box `kind` violates the privacy floor
+    or a caller ceiling, else None. BC derives the verdict ONLY from its own floor
+    and the caller's forwarded ceilings — never from the engine's response."""
+    if kind is None:
+        return None
+    if not priv["cloud_permitted"]:
+        return (f"privacy floor {priv['effective']!r} forbids off-box placement")
+    if not ceilings.get("allow_external"):
+        return "caller ceiling allow_external=False forbids off-box placement"
+    if kind == "rented" and not ceilings.get("allow_rented"):
+        return "caller ceiling allow_rented=False forbids a rented node"
+    if kind == "paid" and not ceilings.get("allow_paid"):
+        return "caller ceiling allow_paid=False forbids a paid provider"
+    return None
 
 #: The full closed vocabulary of `RoutingDecision.decision` (recon). A response
 #: whose `decision` is outside this set is malformed → fallback.
@@ -285,7 +352,8 @@ class DelegationResult:
     routing_decision: dict | None = None
     placement_estimate: dict | None = None
     fallback_reason: str | None = None
-    rejected_decision: dict | None = None  # a response BC refused (e.g. would widen)
+    rejected_decision: dict | None = None  # an AC response BC refused (would widen)
+    rejected_estimate: dict | None = None  # a CC estimate BC refused (would widen)
     provenance_ref: str | None = None
     errors: list[str] = field(default_factory=list)
 
@@ -301,6 +369,7 @@ class DelegationResult:
             "placement_estimate": self.placement_estimate,
             "fallback_reason": self.fallback_reason,
             "rejected_decision": self.rejected_decision,
+            "rejected_estimate": self.rejected_estimate,
             "errors": list(self.errors),
         }
 
@@ -358,17 +427,42 @@ def delegate(repo: Repo, workload, *, routing_client: RoutingClient | None = Non
         except DelegationClientError as e:
             result.errors.append(str(e))
 
-    # -- never-widen guard on the ROUTING RESPONSE ---------------------------
+    # -- never-widen guard: the forwarded ceilings BC actually sent ----------
+    # These are the caller ceilings AFTER the privacy-floor AND (assemble_request):
+    # BC only ever tightens them. Both the AC decision and the CC estimate are
+    # re-validated against the floor AND these ceilings — BC never derives privacy
+    # from an engine response, only from its own floor + the caller's ceilings.
+    ctx = request["agentconnect_context"]
+    ceilings = {
+        "allow_external": bool(ctx["allow_external"]),
+        "allow_paid": bool(ctx["allow_paid"]),
+        "allow_rented": bool(ctx["allow_rented"]),
+    }
+
     # A hostile/misconfigured AgentConnect that returns an off-box placement for
-    # privacy-restricted work is REFUSED, not obeyed: BC records it as rejected and
-    # falls back. BC never derives privacy from a response — only from the floor.
-    if routing is not None and not priv["cloud_permitted"] \
-            and routing.get("decision") in _OFFBOX_DECISIONS:
-        result.rejected_decision = routing
-        result.errors.append(
-            f"{AGENTCONNECT}: decision {routing.get('decision')!r} would place "
-            f"{priv['effective']!r} work off-box — refused (privacy floor)")
-        routing = None
+    # privacy-restricted work (or one the caller's ceilings forbid) is REFUSED,
+    # not obeyed: BC records it as rejected and falls back.
+    if routing is not None:
+        rej = _offbox_rejection(_routing_offbox_kind(routing), priv, ceilings)
+        if rej:
+            result.rejected_decision = routing
+            result.errors.append(
+                f"{AGENTCONNECT}: decision {routing.get('decision')!r} would place "
+                f"{priv['effective']!r} work off-box — refused ({rej})")
+            routing = None
+
+    # SYMMETRIC guard on the ComputeConnect ESTIMATE: a hostile estimate whose
+    # placement indicates a cloud/rented/external target for privacy-restricted
+    # work (or work the caller's ceilings forbid) is likewise REFUSED. A prior
+    # gap: the estimate was validated for shape only, never for privacy.
+    if estimate is not None:
+        rej = _offbox_rejection(_estimate_offbox_kind(estimate), priv, ceilings)
+        if rej:
+            result.rejected_estimate = estimate
+            result.errors.append(
+                f"{COMPUTECONNECT}: estimate placement would place "
+                f"{priv['effective']!r} work off-box — refused ({rej})")
+            estimate = None
 
     # -- decide: delegated vs deterministic fallback -------------------------
     if routing is not None and estimate is not None:
@@ -452,6 +546,19 @@ def _record_provenance(repo: Repo, workload: WorkloadSpec, result: DelegationRes
         # never crash the trigger — the decision is already captured. Degrade to a
         # note; the caller still gets its (fallback or delegated) decision.
         result.errors.append(f"provenance: {e}")
+        return None
+    except candidates.SafetyRefused as e:
+        # A task_id / capability_class that trips the capture safety gate must not
+        # crash the trigger. The routing/placement decision itself is unaffected;
+        # degrade to a recorded note (degrade-never-crash, ADR 0008 no-SPOF).
+        result.errors.append(f"provenance: safety-refused ({e})")
+        return None
+    except Exception as e:  # noqa: BLE001 — degrade-never-crash boundary.
+        # Any other capture failure (a candidates/api/db fault) must likewise never
+        # propagate out of delegate(): recording provenance is best-effort, the
+        # decision is already computed and returned to the caller.
+        result.errors.append(
+            f"provenance: capture failed ({type(e).__name__}: {e})")
         return None
     return res.candidate_id
 

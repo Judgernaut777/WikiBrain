@@ -4792,6 +4792,300 @@ def _delegation_checks():
           and cli_doc.get("outcome_class") == "deferred"
           and cli_doc.get("privacy", {}).get("effective") == "repo_sensitive")
 
+    # =====================================================================
+    # Lane-4 FIXER adversarial regressions (symmetric CC guard, ceilings,
+    # bounded client, conformance pin, degrade-never-crash, no-cred-leak).
+    # =====================================================================
+
+    # -- FIX 1: a HOSTILE ComputeConnect ESTIMATE is guarded symmetrically -------
+    class HostileOffboxCC:
+        """Claims eligibility with an OFF-BOX (cloud) placement + cloud runtime."""
+        def estimate(self, body, *, privacy_header=None):
+            return {"eligible": True, "selected_model": "gpt-4o",
+                    "runtime": "openai-api", "loaded": True,
+                    "estimated_queue_seconds": 0.0,
+                    "estimated_tokens_per_second": 99.0, "estimated_quality": 0.99,
+                    "reason": {"provider_id": "openai-cloud",
+                               "placement_class": "cloud", "model": "gpt-4o"}}
+
+    class SpoofedPlacementCC:
+        """placement_class SPOOFED to 'local' but the runtime betrays a cloud API."""
+        def estimate(self, body, *, privacy_header=None):
+            return {"eligible": True, "selected_model": "gpt-4o",
+                    "runtime": "openai-api", "loaded": True,
+                    "estimated_queue_seconds": 0.0,
+                    "estimated_tokens_per_second": 99.0, "estimated_quality": 0.99,
+                    "reason": {"provider_id": "sneaky", "placement_class": "local",
+                               "model": "gpt-4o"}}
+
+    with Repo.open(start=droot) as r:
+        r_hcc = dmod.delegate(r, {"task_id": "task-hostile-cc",
+            "capability_class": "high-capability-local", "privacy_tier": "secret_sensitive"},
+            routing_client=FakeAC(), estimate_client=HostileOffboxCC())
+        hcc_prov = candmod.get(r, refsmod.parse(r_hcc.provenance_ref, refsmod.CANDIDATE))
+    check("delegate FIX1: a hostile CC estimate that places secret_sensitive work "
+          "OFF-BOX (placement_class=cloud, runtime=openai-api) is REFUSED, not "
+          "recorded as delegated -> safe fallback",
+          r_hcc.fallback is True and r_hcc.delegated is False
+          and r_hcc.rejected_estimate is not None
+          and r_hcc.rejected_estimate["reason"]["placement_class"] == "cloud"
+          and r_hcc.placement_estimate is None
+          and any("off-box" in e for e in r_hcc.errors))
+    check("delegate FIX1: the refused hostile CC estimate is recorded ONLY as "
+          "PENDING provenance (never trusted, never promoted)",
+          hcc_prov["status"] == "pending"
+          and hcc_prov["metadata"].get("trusted") is False)
+    with Repo.open(start=droot) as r:
+        r_spoof = dmod.delegate(r, {"task_id": "task-spoof-cc",
+            "capability_class": "high-capability-local", "privacy_tier": "secret_sensitive"},
+            routing_client=FakeAC(), estimate_client=SpoofedPlacementCC())
+    check("delegate FIX1: a CC estimate with a SPOOFED placement_class=local but a "
+          "cloud runtime is still detected as off-box and refused (defense in depth)",
+          r_spoof.fallback is True and r_spoof.rejected_estimate is not None)
+
+    # -- FIX 2: ceilings re-validated for a CLOUD-PERMITTED (public) tier too -----
+    class CloudProviderAC:
+        def route(self, ctx):
+            return {"task_id": ctx["task_id"], "decision": "route_to_cloud_provider",
+                    "selected_provider": "openai", "selected_model": "gpt-4o",
+                    "rejected_options": [], "scores": [], "policy_version": "v1"}
+
+    class RentedNodeAC:
+        def route(self, ctx):
+            return {"task_id": ctx["task_id"], "decision": "route_to_rented_node",
+                    "selected_provider": "vast-ai", "selected_model": "llama-70b",
+                    "rejected_options": [], "scores": [], "policy_version": "v1"}
+
+    class RentedCC:
+        def estimate(self, body, *, privacy_header=None):
+            return {"eligible": True, "selected_model": "llama-70b",
+                    "runtime": "llama.cpp", "loaded": True,
+                    "estimated_queue_seconds": 0.0,
+                    "estimated_tokens_per_second": 50.0, "estimated_quality": 0.8,
+                    "reason": {"provider_id": "vast-ai", "placement_class": "rented",
+                               "model": "llama-70b"}}
+
+    # public tier => cloud_permitted True, but caller withholds allow_external:
+    with Repo.open(start=droot) as r:
+        r_noext = dmod.delegate(r, {"task_id": "task-pub-noext",
+            "capability_class": "high-capability-local", "privacy_tier": "public",
+            "allow_external": False}, routing_client=CloudProviderAC(),
+            estimate_client=FakeCC())
+    check("delegate FIX2: a hostile AC route_to_cloud_provider for a PUBLIC "
+          "(cloud-permitted) tier with allow_external=False is REFUSED on the "
+          "ceiling (not just the privacy floor) -> fallback",
+          r_noext.fallback is True and r_noext.delegated is False
+          and r_noext.rejected_decision is not None
+          and r_noext.rejected_decision["decision"] == "route_to_cloud_provider"
+          and any("allow_external=False" in e for e in r_noext.errors))
+    # public + allow_external but NOT allow_rented => rented node refused:
+    with Repo.open(start=droot) as r:
+        r_norent = dmod.delegate(r, {"task_id": "task-pub-norent",
+            "capability_class": "high-capability-local", "privacy_tier": "public",
+            "allow_external": True, "allow_rented": False},
+            routing_client=RentedNodeAC(), estimate_client=FakeCC())
+    check("delegate FIX2: route_to_rented_node with allow_external=True but "
+          "allow_rented=False is REFUSED on the allow_rented ceiling",
+          r_norent.fallback is True and r_norent.rejected_decision is not None
+          and any("allow_rented=False" in e for e in r_norent.errors))
+    # public + allow_external but NOT allow_paid => cloud placement (paid) refused:
+    with Repo.open(start=droot) as r:
+        r_nopaid = dmod.delegate(r, {"task_id": "task-pub-nopaid",
+            "capability_class": "high-capability-local", "privacy_tier": "public",
+            "allow_external": True, "allow_paid": False},
+            routing_client=FakeAC(), estimate_client=HostileOffboxCC())
+    check("delegate FIX2: a CC cloud (paid) estimate with allow_external=True but "
+          "allow_paid=False is REFUSED on the allow_paid ceiling",
+          r_nopaid.fallback is True and r_nopaid.rejected_estimate is not None
+          and any("allow_paid=False" in e for e in r_nopaid.errors))
+    # sanity: public + all ceilings granted => the rented node IS delegated (the
+    # guard is a floor, not a blanket ban — a permitted outcome still flows).
+    with Repo.open(start=droot) as r:
+        r_ok = dmod.delegate(r, {"task_id": "task-pub-rent-ok",
+            "capability_class": "high-capability-local", "privacy_tier": "public",
+            "allow_external": True, "allow_rented": True},
+            routing_client=RentedNodeAC(), estimate_client=RentedCC())
+    check("delegate FIX2: with public tier + allow_external + allow_rented, a "
+          "rented-node outcome IS permitted (guard tightens, never blanket-bans)",
+          r_ok.delegated is True
+          and r_ok.routing_decision["decision"] == "route_to_rented_node")
+
+    # -- FIX 5: a capture SafetyRefused degrades to a note, never crashes ---------
+    _orig_capture = dmod.api.capture_candidate
+
+    def _refusing_capture(repo, request):
+        raise candmod.SafetyRefused("capture safety refused (test)", None)
+
+    dmod.api.capture_candidate = _refusing_capture
+    try:
+        with Repo.open(start=droot) as r:
+            r_safe = dmod.delegate(r, {"task_id": "task-safety-refused",
+                "capability_class": "high-capability-local",
+                "privacy_tier": "repo_sensitive"},
+                routing_client=FakeAC(), estimate_client=FakeCC())
+    finally:
+        dmod.api.capture_candidate = _orig_capture
+    check("delegate FIX5: a candidates.SafetyRefused during provenance capture is "
+          "caught -> delegate() does NOT crash, still returns its decision, "
+          "provenance_ref is None and a degrade note is recorded",
+          r_safe.provenance_ref is None
+          and r_safe.delegated is True
+          and any("safety-refused" in e for e in r_safe.errors))
+
+    # -- FIX 3 / FIX 6: bounded client + no-credential-leak (real sockets) --------
+    import http.server as _hs
+    import socket as _sock
+    import threading as _thr
+    import time as _time
+
+    class _OversizeHandler(_hs.BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+        def do_POST(self):
+            n = int(self.headers.get("Content-Length") or 0)
+            self.rfile.read(n)
+            body = b"x" * (300 * 1024)  # 300 KiB > 256 KiB cap
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    _osrv = _hs.HTTPServer(("127.0.0.1", 0), _OversizeHandler)
+    _ot = _thr.Thread(target=_osrv.serve_forever, daemon=True)
+    _ot.start()
+    _oport = _osrv.server_address[1]
+    try:
+        _oc = dclients.HttpEstimateClient(f"http://127.0.0.1:{_oport}", path="/")
+        _big_raised = _raises(dclients.DelegationClientError, _oc.estimate, {"x": 1})
+        with Repo.open(start=droot) as r:
+            r_big = dmod.delegate(r, {"task_id": "task-oversize",
+                "capability_class": "high-capability-local",
+                "privacy_tier": "repo_sensitive"},
+                routing_client=FakeAC(),
+                estimate_client=dclients.HttpEstimateClient(
+                    f"http://127.0.0.1:{_oport}", path="/"))
+    finally:
+        _osrv.shutdown()
+    check("delegate FIX3: a 300 KiB response body exceeds the 256 KiB cap -> "
+          "DelegationClientError (no unbounded buffering)", _big_raised)
+    check("delegate FIX3: an oversized CC body -> deterministic fallback (no crash)",
+          r_big.fallback is True and r_big.delegated is False)
+
+    # slow-drip (slowloris): a server that trickles a huge body forever must be
+    # bounded by the WALL-CLOCK deadline, not just the per-read socket timeout.
+    _stop = _thr.Event()
+
+    def _dripper():
+        srv = _sock.socket(_sock.AF_INET, _sock.SOCK_STREAM)
+        srv.setsockopt(_sock.SOL_SOCKET, _sock.SO_REUSEADDR, 1)
+        srv.bind(("127.0.0.1", 0))
+        srv.listen(1)
+        _dripper.port = srv.getsockname()[1]
+        _dripper.ready.set()
+        try:
+            conn, _ = srv.accept()
+            conn.recv(65536)
+            conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 1000000\r\n\r\n")
+            while not _stop.is_set():
+                try:
+                    conn.sendall(b"a")
+                except OSError:
+                    break
+                _time.sleep(0.3)  # drip one byte every 0.3s, far under the tail
+            conn.close()
+        except OSError:
+            pass
+        finally:
+            srv.close()
+    _dripper.ready = _thr.Event()
+    _dt = _thr.Thread(target=_dripper, daemon=True)
+    _dt.start()
+    _dripper.ready.wait(5)
+    try:
+        _sc = dclients.HttpEstimateClient(
+            f"http://127.0.0.1:{_dripper.port}", path="/", timeout=0.6, deadline=1.0)
+        _t0 = _time.monotonic()
+        _slow_raised = _raises(dclients.DelegationClientError, _sc.estimate, {"x": 1})
+        _elapsed = _time.monotonic() - _t0
+    finally:
+        _stop.set()
+    check("delegate FIX3: a slow-drip (slowloris) body is bounded by the wall-clock "
+          "deadline -> DelegationClientError within the deadline, not forever",
+          _slow_raised and _elapsed < 5.0)
+
+    # FIX 6: credentials embedded in a base URL are NEVER surfaced in an error
+    # string NOR persisted to provenance metadata.
+    _cred_port = 0
+    _cs = _sock.socket(_sock.AF_INET, _sock.SOCK_STREAM)
+    _cs.bind(("127.0.0.1", 0))
+    _cred_port = _cs.getsockname()[1]
+    _cs.close()  # closed port => connection refused
+    _cred_url = f"http://svcuser:s3cr3tP4ss@127.0.0.1:{_cred_port}"
+    _crc = dclients.HttpEstimateClient(_cred_url, path="/route/estimate")
+    try:
+        _crc.estimate({"x": 1})
+        _cred_err = ""
+    except dclients.DelegationClientError as _e:
+        _cred_err = str(_e)
+    check("delegate FIX6: a connection error for a URL carrying userinfo does NOT "
+          "leak the credentials in the error message",
+          _cred_err and "s3cr3tP4ss" not in _cred_err and "svcuser" not in _cred_err)
+    with Repo.open(start=droot) as r:
+        r_cred = dmod.delegate(r, {"task_id": "task-cred-leak",
+            "capability_class": "high-capability-local",
+            "privacy_tier": "repo_sensitive"},
+            routing_client=FakeAC(),
+            estimate_client=dclients.HttpEstimateClient(_cred_url, path="/route/estimate"))
+        cred_prov = candmod.get(r, refsmod.parse(r_cred.provenance_ref, refsmod.CANDIDATE))
+    _cred_blob = json.dumps(cred_prov)
+    check("delegate FIX6: URL credentials are NEVER persisted to provenance "
+          "metadata (the recorded decision + errors carry no userinfo)",
+          "s3cr3tP4ss" not in _cred_blob and "svcuser" not in _cred_blob
+          and r_cred.fallback is True)
+
+    # -- FIX 4: conformance pin — BC's cloud-permit copy must mirror AC/CC --------
+    _conf_checked = False
+    _ac_src = os.environ.get(
+        "AGENTCONNECT_CORE_SRC",
+        "/home/mini/mcp-agentconnect/packages/agentconnect-core/src")
+    if Path(_ac_src).is_dir() and _ac_src not in sys.path:
+        sys.path.insert(0, _ac_src)
+    try:
+        from agentconnect.core.models import PRIVACY_STRICTNESS as _AC_STRICT
+        check("delegate FIX4 (conformance): BC's PRIVACY_STRICTNESS byte-mirrors "
+              "AgentConnect's core.models.PRIVACY_STRICTNESS (no silent drift)",
+              dmod.PRIVACY_STRICTNESS
+              == {t.value: rank for t, rank in _AC_STRICT.items()})
+        _conf_checked = True
+    except ImportError:
+        pass
+    _cc_src = "/home/mini/ComputeConnect/src"
+    if Path(_cc_src).is_dir() and _cc_src not in sys.path:
+        sys.path.insert(0, _cc_src)
+    try:
+        from computeconnect.privacy import (
+            CLOUD_PERMITTING_TIERS as _CC_CLOUD,
+            PRIVACY_STRICTNESS as _CC_STRICT,
+            MOST_RESTRICTIVE_TIER as _CC_MOST)
+        check("delegate FIX4 (conformance): BC's CLOUD_PERMITTING_TIERS + "
+              "PRIVACY_STRICTNESS + MOST_RESTRICTIVE_TIER byte-mirror "
+              "ComputeConnect's — if CC TIGHTENS its cloud-permit set, BC cannot "
+              "silently widen",
+              dmod.CLOUD_PERMITTING_TIERS == _CC_CLOUD
+              and dmod.PRIVACY_STRICTNESS == _CC_STRICT
+              and dmod.MOST_RESTRICTIVE_TIER == _CC_MOST)
+        _conf_checked = True
+    except ImportError:
+        pass
+    # BC must stay fail-closed on an unknown tier regardless of the sibling pin.
+    check("delegate FIX4: BC treats an unknown tier as NOT cloud-permitted "
+          "(fail-closed), independent of the sibling conformance pin",
+          dmod.resolve_privacy("totally-unknown-tier").cloud_permitted is False)
+    if not _conf_checked:
+        check("delegate FIX4 (conformance) SKIPPED: neither AgentConnect nor "
+              "ComputeConnect importable in this venv", True)
+
     # -- guarded LIVE smoke against a real AC/CC (skipped by default) -------------
     _live = os.environ.get("BRAINCONNECT_LANE4_LIVE", "").strip()
     if _live:
