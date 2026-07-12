@@ -4014,8 +4014,207 @@ def main():
         else:
             os.environ[DB_ENV_VAR] = _saved_db
 
+    # ---------------- Production hardening (Part VIII) -----------------------
+    _hardening_checks()
+
     print(f"\nRESULT: {PASS} passed, {FAIL} failed")
     sys.exit(1 if FAIL else 0)
+
+
+def _hardening_checks():
+    """Concurrency, backup/restore, upgrade, service-mode, promotion-gate regressions."""
+    import sqlite3 as _sqlite3
+    import threading as _threading
+    from brainconnect import backup as backupmod, candidates as candmod
+    from brainconnect import api as apimod, safety as safetymod
+    from brainconnect import schema as schemamod
+    from brainconnect.db import Repo
+
+    # -- 1. promotion is atomic under concurrency: no double-promote ------------
+    print("[hardening] concurrent promotion of one candidate yields exactly one claim")
+    proot = make_repo(Path(tempfile.mkdtemp(prefix="wikibrain-race-")))
+    with Repo.open(start=proot) as r:
+        cid, _ = candmod.create_checked(
+            r, "One candidate many threads will race to promote.",
+            proposed_by="w", proposed_by_type="worker", proposed_scopes=[])
+        r.finalize("seed", "seed")
+    ref = f"candidate_{cid}"
+    results: list = []
+    barrier = _threading.Barrier(16)
+
+    def _race():
+        barrier.wait()  # maximize overlap on the read-check-write
+        try:
+            with Repo.open(start=proot) as rr:
+                out = apimod.promote(rr, ref, reviewer="matthew",
+                                     confidence="high", scope="global")
+            results.append(("ok", out["id"]))
+        except Exception as e:  # noqa: BLE001
+            results.append(("err", type(e).__name__))
+
+    threads = [_threading.Thread(target=_race) for _ in range(16)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    wins = [x for x in results if x[0] == "ok"]
+    with Repo.open(start=proot) as r:
+        n_claims = r.one("SELECT COUNT(*) n FROM claims WHERE candidate_id=?", (cid,))["n"]
+        cand_status = r.one("SELECT status FROM memory_candidates WHERE id=?", (cid,))["status"]
+        integrity = r.one("PRAGMA integrity_check")[0]
+    check("exactly one concurrent promotion won", len(wins) == 1)
+    check("the raced candidate has exactly one claim (no double-promote)", n_claims == 1)
+    check("the raced candidate is left status=promoted", cand_status == "promoted")
+    check("the ledger passes integrity_check after the promotion race", integrity == "ok")
+
+    # -- 2. readers during a write, WAL, busy timeout --------------------------
+    print("[hardening] SQLite concurrency: WAL, readers-during-write, busy timeout")
+    croot = make_repo(Path(tempfile.mkdtemp(prefix="wikibrain-wal-")))
+    with Repo.open(start=croot) as r:
+        check("served/opened DBs use WAL journal mode",
+              r.one("PRAGMA journal_mode")[0].lower() == "wal")
+        check("a busy_timeout is set so writers wait instead of failing fast",
+              r.one("PRAGMA busy_timeout")[0] >= 1000)
+    # A reader on its own connection sees committed data while a second connection
+    # holds an open write transaction (WAL lets readers proceed during a write).
+    wconn = _sqlite3.connect(str(Repo.open(start=croot).cfg.db_path))
+    wconn.execute("PRAGMA busy_timeout=5000")
+    wconn.execute("BEGIN IMMEDIATE")
+    wconn.execute("INSERT INTO sources(hash,path,title,url,origin,fetched_at,ingested_at,status)"
+                  " VALUES('wr','p','t','u','manual','t','t','active')")
+    with Repo.open(start=croot) as reader:
+        # The uncommitted row is invisible to the reader; the read does not block.
+        pre = reader.one("SELECT COUNT(*) n FROM sources")["n"]
+    wconn.commit()
+    with Repo.open(start=croot) as reader:
+        post = reader.one("SELECT COUNT(*) n FROM sources")["n"]
+    check("a reader proceeds during an open write and does not see the uncommitted row",
+          post == pre + 1)
+    ck = wconn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+    check("an explicit WAL checkpoint(TRUNCATE) succeeds (busy=0)", ck[0] == 0)
+    wconn.close()
+
+    # -- 3. backup / restore round-trip incl WAL -------------------------------
+    print("[hardening] backup/restore round-trips WAL-resident data + integrity")
+    broot = make_repo(Path(tempfile.mkdtemp(prefix="wikibrain-bak-")))
+    with Repo.open(start=broot) as r:
+        for i in range(3):
+            candmod.create_checked(r, f"backup me {i}", proposed_by="w",
+                                   proposed_by_type="worker", proposed_scopes=[])
+        r.finalize("seed", "seed")
+        snap = Path(broot) / "snap.db"
+        info = backupmod.backup(r, snap)
+    check("backup reports integrity ok and the correct schema version",
+          info["integrity"] == "ok" and info["schema_version"] == schemamod.SCHEMA_VERSION)
+    check("the snapshot captured the candidates", info["counts"]["memory_candidates"] == 3)
+    # mutate, then restore, then confirm the round-trip
+    with Repo.open(start=broot) as r:
+        candmod.create_checked(r, "added after snapshot", proposed_by="w",
+                               proposed_by_type="worker", proposed_scopes=[])
+        r.finalize("mut", "mut")
+        db_path = r.cfg.db_path
+    rinfo = backupmod.restore(snap, db_path, make_pre_restore=None)
+    with Repo.open(start=broot) as r:
+        after = r.one("SELECT COUNT(*) n FROM memory_candidates")["n"]
+    check("restore round-trips to the snapshot's contents", after == 3 and rinfo["counts_match"])
+    check("restore verifies integrity of the restored DB", rinfo["integrity"] == "ok")
+    # a corrupt backup is refused, not restored
+    bad = Path(broot) / "bad.db"
+    bad.write_bytes(b"SQLite format 3\x00" + b"\x00" * 200)  # header only, garbage
+    _bad_refused = False
+    try:
+        backupmod.restore(bad, db_path)
+    except backupmod.BackupError:
+        _bad_refused = True
+    except _sqlite3.DatabaseError:
+        _bad_refused = True
+    check("restore refuses a corrupt backup rather than overwriting the live DB",
+          _bad_refused)
+
+    # -- 4. service mode: HTTP path never rewrites curation projections --------
+    print("[hardening] service mode: served writes don't touch db/dump.sql or log.md")
+    sroot = make_repo(Path(tempfile.mkdtemp(prefix="wikibrain-svc-")))
+    dump_p = Path(sroot) / "db" / "dump.sql"
+    log_p = Path(sroot) / "log.md"
+    dump_before = dump_p.read_text() if dump_p.exists() else ""
+    log_before = log_p.read_text()
+    with Repo.open(start=sroot, write_projections=False) as r:
+        candmod.create_checked(r, "service-mode write", proposed_by="w",
+                               proposed_by_type="worker", proposed_scopes=[])
+        r.finalize("svc", "svc")
+    check("service-mode finalize does not rewrite db/dump.sql",
+          (dump_p.read_text() if dump_p.exists() else "") == dump_before)
+    check("service-mode finalize does not append to log.md", log_p.read_text() == log_before)
+    with Repo.open(start=sroot) as r:
+        check("service-mode writes are still durable in the DB",
+              r.one("SELECT COUNT(*) n FROM memory_candidates")["n"] == 1)
+    # default (CLI) mode still writes the projections
+    with Repo.open(start=sroot) as r:
+        candmod.create_checked(r, "cli-mode write", proposed_by="w",
+                               proposed_by_type="worker", proposed_scopes=[])
+        r.finalize("cli", "cli")
+    check("default (CLI) mode still refreshes the curation projections",
+          dump_p.exists() and "cli" in log_p.read_text())
+
+    # -- 5. promotion-override future-route guard ------------------------------
+    print("[hardening] the HTTP promote surface can never grow a safety-override field")
+    from brainconnect import server as srvmod
+    override_fields = {"safety_override", "override_reason"}
+    check("no override field is in the HTTP promote allowlist (guards a future route)",
+          not (override_fields & srvmod._PROMOTE_FIELDS))
+    # An override-carrying payload is refused forbidden by the handler contract,
+    # and the allowlist rejects any unknown field, so no new field silently reaches
+    # api.promote's safety_override argument.
+    check("safety_override is not an accepted HTTP promote field",
+          "safety_override" not in srvmod._PROMOTE_FIELDS
+          and "override_reason" not in srvmod._PROMOTE_FIELDS)
+
+    # -- 6. safety fail-closed: required engine unavailable --------------------
+    print("[hardening] fail-closed when a required engine is unavailable")
+    froot = Path(tempfile.mkdtemp(prefix="wikibrain-failclosed-"))
+    fdb = froot / "wiki.db"
+    (froot / "db").mkdir(); (froot / "inbox").mkdir()
+    (froot / "wiki").mkdir()
+    write(froot / "log.md", "# log\n")
+    # healthy first: promote a clean claim
+    write(froot / "config.toml", f'[paths]\ndb = "{fdb.as_posix()}"\nbookmark_folder = "wiki"\n')
+    init_db(start=froot).close()
+    with Repo.open(start=froot) as r:
+        cid2, _ = candmod.create_checked(r, "The api gateway lives at 10.0.0.9.",
+                                         proposed_by="w", proposed_by_type="worker",
+                                         proposed_scopes=[])
+        r.finalize("seed", "seed")
+        apimod.promote(r, f"candidate_{cid2}", reviewer="m", confidence="high",
+                       scope="global")
+    safetymod.clear_engine_cache()
+    # now require an engine whose dependency is absent (presidio)
+    write(froot / "config.toml",
+          f'[paths]\ndb = "{fdb.as_posix()}"\nbookmark_folder = "wiki"\n'
+          '[safety]\nenabled = true\n'
+          '[safety.engines.baseline]\nenabled = true\nrequired = true\n'
+          '[safety.engines.presidio]\nenabled = true\nrequired = true\n')
+    with Repo.open(start=froot) as r:
+        h = apimod.health(r)
+        check("health ok:false when a required engine is unavailable", h["ok"] is False)
+        check("health names the unavailable required engine",
+              "presidio" in h["safety"].get("required_engines_unavailable", []))
+        pack = apimod.recall(r, {"query": "api gateway", "profile": "manager_brief",
+                                 "max_items": 5}).as_dict()
+        check("recall WITHHOLDS the claim it cannot re-scan (fail-closed)",
+              len(pack["items"]) == 0)
+        # a fresh candidate cannot be promoted while the required engine is down
+        cid3, _ = candmod.create_checked(r, "another note", proposed_by="w",
+                                         proposed_by_type="worker", proposed_scopes=[])
+        r.finalize("seed2", "seed2")
+        _refused = False
+        try:
+            apimod.promote(r, f"candidate_{cid3}", reviewer="m", confidence="high",
+                           scope="global")
+        except candmod.SafetyRefused:
+            _refused = True
+        check("promotion is refused (safety) while a required engine is unavailable",
+              _refused)
+    safetymod.clear_engine_cache()
 
 
 if __name__ == "__main__":
