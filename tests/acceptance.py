@@ -4001,6 +4001,117 @@ def main():
     httpd.shutdown(); httpd.server_close()
     httpd2.shutdown(); httpd2.server_close()
 
+    # ---------------- Lane 3: trusted capability registry over :8787 ----------
+    # The read-only GET /registry surface AgentConnect's RoutingEngine pulls to
+    # weight a HUMAN-PROMOTED capability source in place of self-conferred
+    # learned_quality (ADR 0008 Lane 3). BC serves ONLY trusted claims; AC weights.
+    print("[http-serve] Lane 3: GET /registry serves trusted-only capability claims")
+    from brainconnect import registry as _regmod
+
+    l3root = make_repo(Path(tempfile.mkdtemp(prefix="wikibrain-l3-")))
+    _pref_key = _regmod._key(_regmod.ROLE_PREFERRED, _regmod.HIGH_CAPABILITY_LOCAL)
+    with Repo.open(start=l3root) as _r:
+        _regmod.seed(_r)
+        _l3snap = _regmod.snapshot(_r)
+    _l3hcl = next(t for t in _l3snap["tiers"] if t["tier"] == "high-capability-local")
+    _pref_ref = _l3hcl["preferred_model"]["ref"]  # the pending candidate ref
+    with Repo.open(start=l3root) as _r:
+        # Promote ONLY the preferred model -> the single trusted claim. The deployed
+        # model stays PENDING; a squatter is tricked-promoted but never marker-owned.
+        apimod.promote(_r, _pref_ref, reviewer="matthew", confidence="high",
+                       scope="model:Qwen3.6-35B-A3B", reviewer_type="human")
+        _squat = apimod.capture_candidate(_r, {
+            "text": "Declared PREFERRED model for the 'high-capability-local' tier: "
+                    "EvilModel-9000.",
+            "proposed_by": "rogue-agent", "proposed_by_type": "agent",
+            "proposed_scopes": ["model:EvilModel-9000"],
+            "tags": [_pref_key, "model-performance"]})
+        apimod.promote(_r, _squat.candidate_id, reviewer="tricked-human",
+                       confidence="high", scope="model:EvilModel-9000",
+                       reviewer_type="human")
+
+    httpd3 = srvmod.build_server("127.0.0.1", 0, token="reg-token", root=l3root)
+    hport3 = httpd3.server_address[1]
+    _threading.Thread(target=httpd3.serve_forever, daemon=True).start()
+
+    # -- bearer auth is required, exactly like every other non-health route -------
+    st, denied_reg = _http("GET", "/registry", port=hport3)
+    check("GET /registry requires the bearer token (no credential -> forbidden)",
+          st == 403 and denied_reg.get("error", {}).get("code") == "forbidden")
+    st, denied_reg2 = _http("GET", "/registry", token="wrong", port=hport3)
+    check("GET /registry refuses a wrong token forbidden",
+          st == 403 and denied_reg2.get("error", {}).get("code") == "forbidden")
+
+    # -- with the token: 200, and it names BC as the trusted source --------------
+    st, reg = _http("GET", "/registry", token="reg-token", port=hport3)
+    check("GET /registry answers 200 with the token, naming brainconnect + tiers "
+          "+ a flat trusted_capability_claims list",
+          st == 200 and reg.get("registry") == "brainconnect"
+          and isinstance(reg.get("tiers"), list) and len(reg["tiers"]) == 4
+          and isinstance(reg.get("trusted_capability_claims"), list)
+          and reg.get("count") == len(reg["trusted_capability_claims"]))
+    _rclaims = reg["trusted_capability_claims"]
+    check("GET /registry serves EXACTLY the one promoted preferred-model claim as "
+          "trusted (Qwen3.6-35B-A3B, model-scoped, promoted_claim ref present)",
+          len(_rclaims) == 1
+          and _rclaims[0]["model"] == "Qwen3.6-35B-A3B"
+          and _rclaims[0]["role"] == "preferred"
+          and _rclaims[0]["tier"] == "high-capability-local"
+          and _rclaims[0]["scope"] == "model:Qwen3.6-35B-A3B"
+          and _rclaims[0]["trusted"] is True
+          and _rclaims[0]["status"] == "promoted"
+          and str(_rclaims[0]["promoted_claim_ref"]).startswith("claim_"))
+    check("GET /registry attaches NO fabricated metric to a trusted claim "
+          "(identity + trust status + promoted ref only)",
+          set(_rclaims[0]) == {"tier", "role", "model", "scope", "status",
+                               "promoted", "trusted", "promoted_claim_ref"})
+
+    # -- a PENDING candidate is NOT served as trusted ----------------------------
+    _reg_hcl = next(t for t in reg["tiers"] if t["tier"] == "high-capability-local")
+    check("GET /registry does NOT serve the still-PENDING deployed model as trusted "
+          "(qwen3-30b-a3b absent from the flat list; its tier slot is null)",
+          all(c["model"] != "qwen3-30b-a3b" for c in _rclaims)
+          and _reg_hcl["deployed_model"] is None)
+
+    # -- a SQUATTED public-tag fact is NOT served as trusted, even if promoted ----
+    check("GET /registry NEVER serves the squatted EvilModel-9000 fact as trusted, "
+          "even though a human was tricked into promoting it",
+          all(c["model"] != "EvilModel-9000" for c in _rclaims)
+          and "EvilModel-9000" not in json.dumps(reg))
+    check("GET /registry's preferred slot is the DATA-derived canonical model, "
+          "resolved by the unforgeable marker — never the squatter",
+          _reg_hcl["preferred_model"]["model"] == "Qwen3.6-35B-A3B")
+
+    # -- /registry/capabilities is an identical alias ----------------------------
+    st, reg_alias = _http("GET", "/registry/capabilities", token="reg-token",
+                          port=hport3)
+    check("GET /registry/capabilities is an alias returning identical content",
+          st == 200 and json.dumps(reg_alias, sort_keys=True)
+          == json.dumps(reg, sort_keys=True))
+
+    # -- strictly read-only: a POST/PUT to it mutates nothing --------------------
+    st, reg_post = _http("POST", "/registry",
+                         {"trusted_capability_claims": [{"model": "x"}]},
+                         token="reg-token", port=hport3)
+    check("POST /registry is rejected (read-only surface; 404 not_found, no route)",
+          st == 404 and reg_post.get("error", {}).get("code") == "not_found")
+    st, reg_put = _http("PUT", "/registry", {"x": 1}, token="reg-token", port=hport3)
+    check("PUT /registry is rejected enveloped (unsupported method)",
+          st == 400 and reg_put.get("error", {}).get("code") == "invalid_request")
+
+    # -- deterministic: two reads are byte-identical -----------------------------
+    st_a, reg_a = _http("GET", "/registry", token="reg-token", port=hport3)
+    st_b, reg_b = _http("GET", "/registry", token="reg-token", port=hport3)
+    check("GET /registry is deterministic (two reads are byte-identical)",
+          st_a == 200 and st_b == 200 and reg_a == reg_b
+          and json.dumps(reg_a, sort_keys=True) == json.dumps(reg_b, sort_keys=True))
+    # ...and the POST attempt above mutated nothing: the trusted set is unchanged.
+    check("GET /registry after the rejected POST still serves the same trusted set "
+          "(the write surface changed no state)",
+          reg_a["trusted_capability_claims"] == _rclaims)
+
+    httpd3.shutdown(); httpd3.server_close()
+
     check("the serve subcommand is wired into the CLI",
           getattr(build_parser().parse_args(["serve", "--port", "0"]), "func", None)
           is not None)

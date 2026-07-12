@@ -9,7 +9,18 @@ and nothing else:
     POST /candidates/{id}/promote    -> promoted claim        (api.promote)
     GET  /candidates?status=&limit=  -> {"count", "candidates"}  (api.pending)
     POST /feedback                   -> {"recorded": true}    (api.record_feedback)
+    GET  /registry                   -> trusted capability claims (registry.trusted_view)
+    GET  /registry/capabilities      -> alias of GET /registry
     GET  /health                     -> api.health
+
+The ``/registry`` route is the ADR-0008 Lane-3 transport (docs/REGISTRY.md §7): a
+READ-ONLY view of the capability registry restricted to TRUSTED, human-promoted
+claims, which AgentConnect's ``RoutingEngine`` PULLS to weight a trusted source in
+place of its self-conferred ``learned_quality``. BC serves only trusted claims; how
+AC weights them lives in the AgentConnect repo, not here. It is bearer-authed like
+every other non-health route, serves no pending/squatted fact as trusted, holds no
+live state, and mutates nothing — a POST/PUT to it is rejected by the method
+handling below. It needs zero models loaded (it reads the ledger, never ``:8080``).
 
 Everything of consequence is a property of the API layer, not of this file:
 
@@ -43,7 +54,7 @@ import re
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
 
-from . import api, candidates, errors
+from . import api, candidates, errors, registry
 from .db import Repo
 
 DEFAULT_HOST = "127.0.0.1"
@@ -129,6 +140,17 @@ def _candidates(repo: Repo, query: dict) -> dict:
         raise api.ApiError("limit must be >= 1")
     rows = candidates.listing(repo, status=status, limit=min(limit, 500))
     return {"count": len(rows), "candidates": rows}
+
+
+def _registry(repo: Repo) -> dict:
+    """The trusted-only capability registry view (ADR 0008 Lane 3).
+
+    Pure serialization of `registry.trusted_view`: all trust resolution — the
+    unforgeable registry marker, promoted-claim status, the pending/squatter
+    exclusion — lives in registry.py. This handler reads nothing else and mutates
+    nothing; it is reached only via `do_GET`, so it is structurally read-only.
+    """
+    return registry.trusted_view(repo)
 
 
 def _feedback(repo: Repo, payload: dict) -> dict:
@@ -287,6 +309,12 @@ class _Handler(BaseHTTPRequestHandler):
         if url.path == "/candidates":
             query = parse_qs(url.query)
             self._dispatch(lambda repo: _candidates(repo, query))
+            return
+        if url.path in ("/registry", "/registry/capabilities"):
+            # Trusted-only capability claims for AgentConnect to pull (ADR 0008
+            # Lane 3). Authed by `_dispatch` exactly like every other route; a
+            # POST/PUT never reaches here, so the surface is read-only.
+            self._dispatch(_registry)
             return
         self._not_found(url.path)
 

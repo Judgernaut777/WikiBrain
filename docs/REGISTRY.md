@@ -151,7 +151,50 @@ brainconnect promote candidate_N \          # human-gated promotion (never an ag
   --scope model:Qwen3.6-35B-A3B --confidence high
 ```
 
-## 6. Boundary reminders (ADR 0008, binding)
+## 7. Serving trusted claims over `:8787` (ADR 0008 Lane 3)
+
+The registry's trusted claims are served to AgentConnect over the existing
+`brainconnect serve` HTTP surface (`cli/brainconnect/server.py`, default
+`127.0.0.1:8787`) so AC's `RoutingEngine` can **pull** a human-promoted capability
+source and weight it *instead of* its self-conferred `learned_quality` (the
+self-promotion LEDGER_SPEC §2 forbids). This is the **BC side only**: BC serves
+trusted claims; **how AC weights them lives in the AgentConnect repo**, out of scope
+here.
+
+```
+GET /registry                 # trusted-only capability claims (bearer-authed)
+GET /registry/capabilities    # identical alias
+```
+
+Properties (all enforced in `registry.trusted_view` + `tests/acceptance.py`):
+
+- **Read-only.** No mutation path exists: the route is `GET`-only, a `POST` is a
+  route miss (`404 not_found`) and any other verb wears the enveloped
+  `invalid_request`. The handler resolves and serializes; it writes nothing.
+- **Bearer-authed exactly like every other route.** When a token is configured, a
+  missing/wrong credential is refused `forbidden` (`403`); only `GET /health` stays
+  open. It reuses the server's one auth path — there is no route-specific auth.
+- **Trusted-only.** The payload carries the tier hierarchy STRUCTURE (ordinal,
+  required capabilities, provider — data-derived, never squattable) and, per tier,
+  the preferred/deployed **model claim only when it is `trusted`** (promoted AND
+  uncontradicted, resolved by the unforgeable registry marker — §4.1). A **pending**
+  candidate and a **squatted** `reg:*` fact — even one a human is tricked into
+  promoting — are **omitted** (the tier slot goes `null`), never relabelled trusted.
+  A flat `trusted_capability_claims` list gives AC the consumable set directly.
+- **No fabricated numbers, no live state.** Each claim carries identity
+  (tier/role/model/scope), trust status, and the promoted-claim ref AC keys on —
+  and nothing else. No benchmark metric is attached (measured numbers arrive as
+  candidates through Lane 7), and `deployed` remains a static declared fact, never a
+  liveness signal. The endpoint needs **zero models loaded** — it reads the ledger,
+  never `:8080`.
+- **Deterministic.** Two reads against an unchanged ledger are byte-identical
+  (`trusted_view` walks the deterministic `snapshot()`).
+
+The consumption side — AC pulling this endpoint and folding it into
+`RoutingEngine.route` weighting — is **delegated to the AgentConnect repo** (ADR
+0008: BC serves trusted claims, AC decides how to weight them).
+
+## 8. Boundary reminders (ADR 0008, binding)
 
 - Do **not** add routing/placement/scheduling/residency math here. Call
   AgentConnect and ComputeConnect; record the returned decision as provenance

@@ -341,6 +341,102 @@ def snapshot(repo: Repo) -> dict:
     }
 
 
+# --- the trusted-only view (ADR 0008 Lane 3, served over :8787) --------------
+# AgentConnect's `RoutingEngine` pulls a HUMAN-PROMOTED capability source to weight
+# instead of its self-conferred `learned_quality` (the self-promotion §2 forbids).
+# What it may weight is EXACTLY the set of trusted claims — nothing pending, nothing
+# squatted. This view is the read side of that contract: it filters `snapshot()` down
+# to only the entries whose ledger status is `trusted` (promoted AND not in an open
+# contradiction — LEDGER_SPEC §14.1, resolved by the unforgeable registry marker in
+# `_status_for`, never by a squattable `reg:*` tag). Untrusted/pending/squatted
+# entries are OMITTED (the tier's model slot goes null), never relabelled trusted.
+#
+# Serialization is delegated to the server; this returns a plain, deterministic
+# dict. It carries NO fabricated numbers — only identity (tier/role/model/scope),
+# trust status, and the promoted claim reference AgentConnect keys on.
+
+def _trusted_model(tier_name: str, entry: dict | None) -> dict | None:
+    """A model entry from `snapshot()`, reshaped for AC — or None if not trusted.
+
+    Only a `trusted` entry (promoted + uncontradicted) survives; a pending or
+    squatter-tricked entry returns None and is therefore never presented as a claim
+    AgentConnect should weight. No metric field is ever added — a capability number
+    is a measured `model_performance` claim that arrives through Lane 7 on its own.
+    """
+    if not entry or not entry.get("trusted"):
+        return None
+    return {
+        "tier": tier_name,
+        "role": entry["role"],
+        "model": entry["model"],
+        "scope": entry["scope"],
+        "status": entry["status"],
+        "promoted": entry["promoted"],
+        "trusted": entry["trusted"],
+        # `snapshot()` resolves a trusted entry's ref to its claim of record.
+        "promoted_claim_ref": entry["ref"],
+    }
+
+
+def _trusted_metadata(entry: dict | None) -> dict | None:
+    """The tier-structure claim's trust status — surfaced only when trusted."""
+    if not entry or not entry.get("trusted"):
+        return None
+    return {
+        "status": entry["status"],
+        "promoted": entry["promoted"],
+        "trusted": entry["trusted"],
+        "promoted_claim_ref": entry["ref"],
+    }
+
+
+def trusted_view(repo: Repo) -> dict:
+    """The registry restricted to TRUSTED, human-promoted capability claims.
+
+    The read-only payload served at ``GET /registry`` (ADR 0008 Lane 3). It is the
+    input AgentConnect PULLS to weight a trusted source in place of self-conferred
+    `learned_quality`; BC decides what is trusted, AC decides how to weight it.
+
+    Shape: the full tier hierarchy STRUCTURE (ordinal / required capabilities /
+    provider — data-derived, never squattable), each with its trusted metadata and
+    preferred/deployed model claim (or ``null`` when not yet promoted), plus a flat
+    ``trusted_capability_claims`` list AC can consume directly. Only entries the
+    ledger marks ``trusted`` appear as claims; pending and squatted facts are
+    omitted, never relabelled. Deterministic — two calls against an unchanged ledger
+    are byte-identical (it walks `snapshot()`, which is itself deterministic).
+    """
+    snap = snapshot(repo)
+    tiers: list[dict] = []
+    flat: list[dict] = []
+    for t in snap["tiers"]:
+        pref = _trusted_model(t["tier"], t["preferred_model"])
+        dep = _trusted_model(t["tier"], t["deployed_model"])
+        tiers.append({
+            "tier": t["tier"],
+            "ordinal": t["ordinal"],
+            "required_capabilities": t["required_capabilities"],
+            "provider": t["provider"],
+            "metadata_claim": _trusted_metadata(t["metadata_claim"]),
+            "preferred_model": pref,
+            "deployed_model": dep,
+        })
+        for model_claim in (pref, dep):
+            if model_claim is not None:
+                flat.append(model_claim)
+    return {
+        "registry": "brainconnect",
+        # What these facts ARE and are NOT — so a consumer can never mistake this
+        # for a benchmark feed or a live-state signal.
+        "trust_basis": (
+            "human-promoted, registry-canonical capability claims — LEDGER_SPEC §2 "
+            "(promotion is human-only), §7 (model_performance), §14 (:8787). No "
+            "benchmark numbers; not a liveness signal."),
+        "tiers": tiers,
+        "trusted_capability_claims": flat,
+        "count": len(flat),
+    }
+
+
 # --- seeding (proposes; never promotes) -------------------------------------
 def _squatter_id(repo: Repo, key: str) -> int | None:
     """A NON-registry candidate that has squatted the public `reg:*` tag for `key`.
