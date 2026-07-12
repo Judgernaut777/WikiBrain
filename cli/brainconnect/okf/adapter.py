@@ -13,6 +13,7 @@ from typing import Protocol, runtime_checkable
 from ..db import Repo
 from .export import FORMAT_NAME, OKF_VERSION, export_bundle
 from .model import ExportRequest, ExportResult
+from .okfimport import ImportRequest, ImportResult, import_bundle
 from .validate import ValidationResult, validate_bundle
 
 
@@ -39,7 +40,7 @@ class KnowledgeFormatAdapter(Protocol):
         """Structurally validate a bundle. (Stage 2.)"""
         ...
 
-    def import_bundle(self, repo: Repo, path, **kw) -> object:
+    def import_bundle(self, repo: Repo, request) -> object:
         """Import a bundle as PENDING candidates. (Stage 3.)"""
         ...
 
@@ -64,6 +65,11 @@ class OKFAdapter:
         Never mutates, imports, or executes bundle content."""
         return validate_bundle(path, limits)
 
-    def import_bundle(self, repo: Repo, path, **kw):
-        raise NotImplementedError(
-            "OKF import is Stage 3; this build ships the exporter only")
+    def import_bundle(self, repo: Repo, request: ImportRequest) -> ImportResult:
+        """Import a bundle as PENDING candidates (Stage 3).
+
+        Structural validation (reuse Stage 2) -> provenance registration -> the
+        `memory_candidate` safety scan -> PENDING candidate creation -> stop.
+        Never promotes; never overwrites a canonical claim; refuses an invalid
+        bundle whole (no partial import)."""
+        return import_bundle(repo, request)

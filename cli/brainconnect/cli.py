@@ -662,6 +662,56 @@ def cmd_export(args):
         print(f"  ! {w}")
 
 
+def cmd_import(args):
+    """Import an OKF bundle as PENDING memory candidates (never auto-promoted).
+
+    Flow: structural validation (an invalid bundle imports NOTHING) -> provenance
+    registration -> the memory_candidate safety scan -> pending candidate creation.
+    Human promotion is a separate, unchanged surface. An external id never
+    overwrites a canonical claim; a conflict is reported for operator action.
+    """
+    from .okf import OKFAdapter, ImportRequest
+    try:
+        scope = scopesmod.parse(args.scope)
+    except _LEDGER_ERRORS as e:
+        sys.exit(f"error: {e}")
+    by = args.by or _whoami()
+    with Repo.open() as repo:
+        try:
+            result = OKFAdapter().import_bundle(repo, ImportRequest(
+                bundle_dir=args.dir, scope=scope, imported_by=by,
+                imported_by_type=args.by_type,
+                tags=args.tag or [], dry_run=args.dry_run))
+        except _LEDGER_ERRORS as e:
+            sys.exit(f"error: {e}")
+    if _emit(result.as_dict(), args.json):
+        sys.exit(0 if result.valid else 1)
+    if not result.valid:
+        print(f"OKF bundle is structurally INVALID: {len(result.validation_errors)} "
+              "error(s). Nothing was imported (no partial import).")
+        for e in result.validation_errors:
+            loc = f" [{e['path']}]" if e.get("path") else ""
+            print(f"  ! {e['code']}: {e['message']}{loc}")
+        sys.exit(1)
+    verb = "would import" if result.dry_run else "imported"
+    print(f"{verb} from {result.bundle_dir} (OKF {result.okf_version}) "
+          f"into {result.scope} by {result.imported_by} ({result.imported_by_type})")
+    print(f"  created: {len(result.created)}  updated: {len(result.updated)}  "
+          f"duplicate: {len(result.duplicates)}  conflict: {len(result.conflicts)}  "
+          f"rejected: {len(result.rejected)}")
+    if result.quarantined:
+        print(f"  {len(result.quarantined)} candidate(s) QUARANTINED — a human must "
+              "override to promote")
+    if result.redacted:
+        print(f"  {len(result.redacted)} candidate(s) had content MASKED by safety policy")
+    for d in result.documents:
+        if d.outcome == "conflict":
+            print(f"  ! CONFLICT {d.document_path}: {d.detail}")
+    print("Imported documents are PENDING candidates. None is trusted or promoted; "
+          "promotion is a separate, human-only step.")
+    sys.exit(0)
+
+
 def cmd_okf(args):
     """Structurally validate or summarize an OKF bundle. Reads files only.
 
@@ -1215,6 +1265,27 @@ def build_parser() -> argparse.ArgumentParser:
                       help="also export superseded claims and a history log")
     addj(xokf)
     sxp.set_defaults(func=cmd_export)
+
+    # import: bring an OKF bundle in as PENDING candidates (never auto-promoted)
+    simp = sub.add_parser("import", help="import an external bundle as pending candidates")
+    impsub = simp.add_subparsers(dest="icmd", required=True)
+    iokf = impsub.add_parser("okf", help="Open Knowledge Format Markdown bundle")
+    iokf.add_argument("dir", help="bundle directory to import")
+    iokf.add_argument("--scope", required=True,
+                      help="scope assigned to every created candidate, e.g. repo:my-app "
+                           "(the operator governs blast radius, not the bundle)")
+    iokf.add_argument("--by", default=None,
+                      help="importing actor (recorded on every candidate; "
+                           "defaults to the current user)")
+    iokf.add_argument("--by-type", dest="by_type", default="human",
+                      choices=candmod.PROPOSER_TYPES,
+                      help="actor type (recorded only; no type can bypass promotion)")
+    iokf.add_argument("--tag", action="append",
+                      help="repeatable tag applied to every created candidate")
+    iokf.add_argument("--dry-run", dest="dry_run", action="store_true",
+                      help="validate and plan only; create nothing")
+    addj(iokf)
+    simp.set_defaults(func=cmd_import)
 
     # okf: structurally validate / summarize a bundle (read-only; no ledger)
     sokf = sub.add_parser("okf", help="work with OKF bundles (validate, inspect)")

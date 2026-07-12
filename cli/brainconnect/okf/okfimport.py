@@ -1,0 +1,535 @@
+"""OKF import (Stage 3) — the HIGHEST-RISK stage, and the most conservative.
+
+Import turns an external OKF bundle into **pending memory candidates**. That is the
+entire ceiling of its authority. It is written so that no combination of inputs —
+hostile bundle, agent actor, colliding external id, changed source, a secret or an
+injection lure planted in a document — can do anything a human did not separately
+and explicitly approve through the normal promotion gate.
+
+The flow, in order, and never out of order:
+
+    1. structural VALIDATION      reuse Stage 2; an invalid bundle is refused whole.
+                                  There is no partial import — nothing is written.
+    2. provenance registration    each document's identity, checksum, bundle path,
+                                  OKF version and relationships are recorded.
+    3. import SAFETY scan         every document runs the existing `memory_candidate`
+                                  surface BEFORE it is stored: secrets are masked,
+                                  injection / tool-control content is quarantined.
+    4. candidate creation         a PENDING candidate, via `candidates.create_checked`.
+                                  There is no argument that makes it anything else.
+    5. stop.                      Human promotion is a separate, unchanged surface.
+
+The invariants this module is responsible for (each one a critical bug if broken):
+
+  * **No auto-promotion, ever.** Every created row is `status='pending'`. Import
+    calls `candidates.create_checked` and never `candidates.promote`.
+  * **No bypass of the human gate.** An `agent` actor may *propose* an import (that
+    is what a candidate is for), but the resulting row is pending like any other;
+    nothing here can make an agent's import trusted.
+  * **An external id confers no write authority over canonical state.** If an
+    imported document's external id already traces to a PROMOTED claim, import
+    REFUSES to touch that claim and returns an explicit `conflict` requiring
+    operator action. It never edits, supersedes, or overwrites a canonical claim.
+  * **OKF-valid is not trusted and is not safe.** A structurally valid bundle is
+    still untrusted, unsafe-until-scanned input. All bundle content is DATA.
+
+Import reuses the existing `memory_candidate` safety surface rather than inventing a
+new one: that surface already masks secrets before storage and quarantines
+injection / tool-control content, which is exactly import's requirement. No new or
+broadened safety policy is introduced (see docs/OKF.md and docs/adr/0006-okf-import.md).
+"""
+from __future__ import annotations
+
+import hashlib
+import json
+from dataclasses import asdict, dataclass, field
+from pathlib import Path
+
+from ..db import Repo
+from ..scopes import Scope
+from .. import candidates as candmod, ingest, refs, util
+from .validate import (ValidationLimits, _Frontmatter, _split_frontmatter,
+                       validate_bundle)
+from .yamlfmt import split_frontmatter
+
+# The source_ref prefix that marks a candidate as OKF-imported. It is queryable
+# (source_ref is a real column) and unique to this subsystem: no other producer
+# of candidates ever writes an `okf:` ref, so a lookup on it never collides with
+# an AgentConnect attempt pointer or a plain capture.
+_REF_PREFIX = "okf:"
+
+# Section headers the exporter appends after a claim body. When we recover the
+# claim text from a document we cut at the first of these — they are bundle
+# scaffolding (links back into the bundle), not part of the claim.
+_SCAFFOLD_HEADERS = ("## Sources", "## Superseded by", "## Contradicts")
+
+# Structural frontmatter fields we retain on the candidate as "original frontmatter
+# where safe". Deliberately excludes the free-text `title`: a hand-authored hostile
+# bundle could plant a secret there, and this metadata is recallable. The claim
+# BODY is the one field that is safety-scanned and masked; these are short,
+# controlled-vocabulary structural values (ids, scope, status, timestamps).
+_SAFE_BC_KEYS = (
+    "status", "scope", "confidence", "trusted", "superseded_by",
+    "contradictions", "provenance", "valid_from", "valid_until",
+    "learned_at", "last_verified_at",
+)
+
+
+@dataclass
+class ImportRequest:
+    #: Directory containing the OKF bundle to import.
+    bundle_dir: str
+    #: The scope the operator assigns to every candidate this import creates. The
+    #: bundle's own `scope` field is retained only as informational metadata — the
+    #: OPERATOR governs blast radius, never the bundle.
+    scope: Scope
+    #: Who is importing. Recorded on every candidate. May be any proposer type,
+    #: including `agent`; that never changes the pending outcome.
+    imported_by: str
+    imported_by_type: str = "human"
+    #: Extra tags applied to every created candidate (in addition to bundle tags).
+    tags: list[str] = field(default_factory=list)
+    limits: "ValidationLimits | None" = None
+    #: Validate + plan only. Creates nothing; reports what an import WOULD do.
+    dry_run: bool = False
+
+
+@dataclass
+class DocResult:
+    """The outcome for one claim document. Carries no matched/unsafe text."""
+    document_path: str
+    external_id: str
+    #: created | duplicate | updated | conflict | rejected
+    outcome: str
+    candidate_ref: str = ""
+    content_checksum: str = ""
+    quarantined: bool = False
+    redacted: bool = False
+    #: Safety finding KINDS only (e.g. ["secret"], ["prompt_injection"]). Never a value.
+    safety_kinds: list[str] = field(default_factory=list)
+    #: For `updated`: the prior candidate(s) for the same external document.
+    prior_candidates: list[str] = field(default_factory=list)
+    #: For `conflict`: the canonical claim an import may NOT overwrite.
+    conflicting_claim: str = ""
+    detail: str = ""
+
+    def as_dict(self) -> dict:
+        return asdict(self)
+
+
+@dataclass
+class ImportResult:
+    bundle_dir: str
+    scope: str
+    imported_by: str
+    imported_by_type: str
+    okf_version: str = ""
+    dry_run: bool = False
+    #: True iff the bundle passed structural validation. When False, NOTHING is
+    #: imported (no partial import) and every other list below is empty.
+    valid: bool = False
+    validation_errors: list[dict] = field(default_factory=list)
+    validation_warnings: list[dict] = field(default_factory=list)
+    #: candidate refs newly created (pending).
+    created: list[str] = field(default_factory=list)
+    #: candidate refs created for a CHANGED external document (also pending).
+    updated: list[str] = field(default_factory=list)
+    #: document paths that were an exact re-import (idempotent no-op).
+    duplicates: list[str] = field(default_factory=list)
+    #: document paths whose external id already traces to a PROMOTED claim; refused.
+    conflicts: list[str] = field(default_factory=list)
+    #: candidate refs created but QUARANTINED (need a human override to promote).
+    quarantined: list[str] = field(default_factory=list)
+    #: candidate refs whose stored body was MASKED by safety policy.
+    redacted: list[str] = field(default_factory=list)
+    #: document paths refused by a safety BLOCK (no candidate created).
+    rejected: list[str] = field(default_factory=list)
+    documents: list[DocResult] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+
+    def as_dict(self) -> dict:
+        d = asdict(self)
+        return d
+
+
+# --- document parsing --------------------------------------------------------
+def _parse_front(text: str, limits: ValidationLimits) -> dict:
+    """Parse a claim document's frontmatter with the validator's bounded parser.
+
+    Never a full YAML loader: the same non-constructing subset parser the validator
+    uses, so a hostile bundle cannot instantiate an object here. Returns `{}` on
+    anything it cannot parse — the bundle already passed validation, so this is
+    belt-and-braces, not the primary structural check.
+    """
+    try:
+        split = _split_frontmatter(text)
+    except Exception:
+        return {}
+    if not split:
+        return {}
+    yaml_text, _body = split
+    try:
+        front = _Frontmatter(yaml_text, limits.max_yaml_depth).parse()
+    except Exception:
+        return {}
+    return front if isinstance(front, dict) else {}
+
+
+def _extract_claim_text(text: str) -> str:
+    """Recover the claim text from a claim document body.
+
+    Drops the leading `# title` heading the exporter writes and cuts at the first
+    bundle-scaffolding section (`## Sources`, etc.). Tolerant: if the document does
+    not follow the exporter's shape, the whole post-frontmatter body is returned —
+    it is untrusted data either way, and a human reviews it before promotion.
+    """
+    try:
+        _front, body = split_frontmatter(text)
+    except ValueError:
+        body = text
+    lines = body.split("\n")
+    i = 0
+    while i < len(lines) and lines[i].strip() == "":
+        i += 1
+    if i < len(lines) and lines[i].startswith("# "):
+        i += 1
+    out: list[str] = []
+    for ln in lines[i:]:
+        if ln.strip() in _SCAFFOLD_HEADERS:
+            break
+        out.append(ln)
+    return "\n".join(out).strip()
+
+
+def _safe_frontmatter(front: dict) -> dict:
+    """The structural, non-sensitive subset of a document's frontmatter.
+
+    Only controlled-vocabulary mapping fields; never the free-text title or an
+    unknown extension field whose value could carry a secret into recallable
+    metadata. Values are truncated defensively.
+    """
+    out: dict = {}
+    bc = front.get("brainconnect")
+    if isinstance(bc, dict):
+        keep: dict = {}
+        for k in _SAFE_BC_KEYS:
+            if k in bc:
+                keep[k] = _bounded(bc[k])
+        if keep:
+            out = keep
+    return out
+
+
+def _bounded(v, _limit: int = 512):
+    if isinstance(v, str):
+        return v[:_limit]
+    if isinstance(v, list):
+        return [_bounded(x, _limit) for x in v[:64]]
+    if isinstance(v, dict):
+        return {str(k)[:64]: _bounded(x, _limit) for k, x in list(v.items())[:32]}
+    return v
+
+
+def _relationships(front: dict) -> dict:
+    bc = front.get("brainconnect")
+    rel: dict = {}
+    if isinstance(bc, dict):
+        sup = bc.get("superseded_by")
+        if isinstance(sup, str) and sup:
+            rel["superseded_by"] = sup
+        con = bc.get("contradictions")
+        if isinstance(con, list):
+            rel["contradictions"] = [c for c in con if isinstance(c, str) and c]
+    return rel
+
+
+def _doc_tags(front: dict) -> list[str]:
+    tags = front.get("tags")
+    if isinstance(tags, list):
+        return [t for t in tags if isinstance(t, str) and t]
+    return []
+
+
+# --- bundle scanning ---------------------------------------------------------
+def _bundle_checksum(root: Path, limits: ValidationLimits) -> str:
+    """A sha256 over the whole bundle's (relpath, bytes). The 'source checksum'.
+
+    The bundle already passed validation (bounded size, no symlink escape), so this
+    walk is safe. Regular files only; symlinks are skipped (validation reported them).
+    """
+    h = hashlib.sha256()
+    files = []
+    for p in sorted(root.rglob("*")):
+        if p.is_symlink() or not p.is_file():
+            continue
+        files.append(p)
+    for p in files:
+        rel = p.relative_to(root).as_posix()
+        h.update(rel.encode("utf-8"))
+        h.update(b"\0")
+        try:
+            h.update(p.read_bytes())
+        except OSError:
+            pass
+        h.update(b"\0")
+    return h.hexdigest()
+
+
+def _claim_docs(root: Path) -> list[tuple[str, Path]]:
+    """Ordered `(relpath, path)` for every `claims/**.md` regular file."""
+    claims_dir = root / "claims"
+    if not claims_dir.is_dir():
+        return []
+    out = []
+    for p in sorted(claims_dir.rglob("*.md")):
+        if p.is_symlink() or not p.is_file():
+            continue
+        out.append((p.relative_to(root).as_posix(), p))
+    return out
+
+
+# --- canonical-state + idempotency lookups -----------------------------------
+def _promoted_for(repo: Repo, source_ref: str):
+    """The PROMOTED claim (with its import checksum) tracing to this external doc.
+
+    Joins claims to the candidate they were promoted from and filters on the
+    import source_ref. Returns `(claim_id, content_checksum)` or `None`. This is
+    how import learns that an external id already owns a canonical claim — and
+    therefore that a changed re-import is a CONFLICT, never an overwrite.
+    """
+    row = repo.one(
+        """SELECT c.id AS claim_id, mc.metadata AS meta
+             FROM claims c JOIN memory_candidates mc ON mc.id = c.candidate_id
+            WHERE c.status = 'promoted' AND mc.source_ref = ?
+            ORDER BY c.id DESC LIMIT 1""",
+        (source_ref,))
+    if not row:
+        return None
+    checksum = ""
+    try:
+        checksum = (json.loads(row["meta"] or "{}")
+                    .get("okf_import", {}).get("content_checksum", ""))
+    except (ValueError, AttributeError):
+        checksum = ""
+    return row["claim_id"], checksum
+
+
+def _candidates_for(repo: Repo, source_ref: str) -> list[dict]:
+    """Existing candidates (any status) for this external document."""
+    rows = repo.q(
+        "SELECT id, status, metadata FROM memory_candidates WHERE source_ref = ?"
+        " ORDER BY id", (source_ref,))
+    out = []
+    for r in rows:
+        try:
+            meta = json.loads(r["metadata"] or "{}")
+        except ValueError:
+            meta = {}
+        out.append({"id": r["id"], "status": r["status"],
+                    "checksum": meta.get("okf_import", {}).get("content_checksum", "")})
+    return out
+
+
+# --- the importer ------------------------------------------------------------
+def import_bundle(repo: Repo, request: ImportRequest) -> ImportResult:
+    """Import an OKF bundle as PENDING candidates. Never promotes, by construction.
+
+    Refuses an invalid bundle whole (no partial import). Scans every document
+    through the `memory_candidate` safety surface before storing it. Refuses to
+    overwrite any canonical claim an external id already owns.
+    """
+    limits = request.limits or ValidationLimits()
+    scope = request.scope
+    result = ImportResult(
+        bundle_dir=str(Path(request.bundle_dir)),
+        scope=str(scope), imported_by=request.imported_by,
+        imported_by_type=request.imported_by_type, dry_run=request.dry_run)
+
+    # (1) STRUCTURAL VALIDATION — reuse Stage 2. An invalid bundle is refused in
+    # full; there is no partial import.
+    verdict = validate_bundle(request.bundle_dir, limits)
+    result.okf_version = verdict.okf_version
+    result.validation_errors = [e.as_dict() for e in verdict.errors]
+    result.validation_warnings = [w.as_dict() for w in verdict.warnings]
+    result.valid = verdict.ok
+    if not verdict.ok:
+        result.warnings.append(
+            f"bundle is structurally INVALID ({len(verdict.errors)} error(s)); "
+            "nothing was imported (no partial import)")
+        return result
+
+    root = Path(request.bundle_dir).resolve()
+    bundle_checksum = _bundle_checksum(root, limits)
+    now = util.now_iso()
+
+    for rel, path in _claim_docs(root):
+        try:
+            raw = path.read_bytes()
+        except OSError as e:
+            result.warnings.append(f"could not read {rel}: {e.strerror}")
+            continue
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            result.warnings.append(f"could not decode {rel} as UTF-8; skipped")
+            continue
+
+        front = _parse_front(text, limits)
+        bc = front.get("brainconnect") if isinstance(front, dict) else None
+        external_id = ""
+        if isinstance(bc, dict) and isinstance(bc.get("id"), str):
+            external_id = bc["id"]
+        if not external_id:
+            external_id = f"path:{rel}"
+        source_ref = _REF_PREFIX + external_id
+        content_checksum = hashlib.sha256(raw).hexdigest()
+
+        dr = DocResult(document_path=rel, external_id=external_id,
+                       outcome="", content_checksum=content_checksum)
+
+        # (canonical guard) An external id that already owns a PROMOTED claim may
+        # never be overwritten by an import. If the content is byte-identical to
+        # what was promoted, this is an idempotent no-op; if it differs, it is a
+        # CONFLICT requiring operator action. Either way, no candidate is created
+        # and the canonical claim is never touched.
+        promoted = _promoted_for(repo, source_ref)
+        if promoted is not None:
+            claim_id, promoted_checksum = promoted
+            dr.conflicting_claim = refs.claim(claim_id)
+            if promoted_checksum and promoted_checksum == content_checksum:
+                dr.outcome = "duplicate"
+                dr.detail = (f"external id {external_id} already promoted to "
+                             f"{refs.claim(claim_id)}; identical re-import ignored")
+                result.duplicates.append(rel)
+            else:
+                dr.outcome = "conflict"
+                dr.detail = (f"external id {external_id} already owns canonical "
+                             f"{refs.claim(claim_id)}; a changed re-import cannot "
+                             "overwrite it. Operator action required (supersede via "
+                             "the normal claim governance path, not import).")
+                result.conflicts.append(rel)
+            result.documents.append(dr)
+            continue
+
+        # (idempotency / update) Compare against prior candidates for this external
+        # document.
+        existing = _candidates_for(repo, source_ref)
+        identical = next((e for e in existing
+                          if e["checksum"] and e["checksum"] == content_checksum
+                          and e["status"] in ("pending", "promoted")), None)
+        if identical is not None:
+            dr.outcome = "duplicate"
+            dr.candidate_ref = refs.candidate(identical["id"])
+            dr.detail = (f"exact re-import of {refs.candidate(identical['id'])} "
+                         f"({identical['status']}); no new candidate")
+            result.duplicates.append(rel)
+            result.documents.append(dr)
+            continue
+
+        is_update = bool(existing)
+        if is_update:
+            dr.prior_candidates = [refs.candidate(e["id"]) for e in existing]
+
+        claim_text = _extract_claim_text(text)
+        if not claim_text:
+            result.warnings.append(f"{rel}: empty claim body; skipped")
+            dr.outcome = "rejected"
+            dr.detail = "empty claim body"
+            result.rejected.append(rel)
+            result.documents.append(dr)
+            continue
+
+        meta = {"okf_import": {
+            "bundle_path": str(Path(request.bundle_dir)),
+            "bundle_checksum": bundle_checksum,
+            "okf_version": verdict.okf_version,
+            "document_path": rel,
+            "external_id": external_id,
+            "content_checksum": content_checksum,
+            "imported_at": now,
+            "imported_by": request.imported_by,
+            "imported_by_type": request.imported_by_type,
+            "relationships": _relationships(front),
+            "frontmatter": _safe_frontmatter(front),
+        }}
+
+        if request.dry_run:
+            dr.outcome = "updated" if is_update else "created"
+            dr.detail = "dry-run: would create a pending candidate"
+            (result.updated if is_update else result.created).append(rel)
+            result.documents.append(dr)
+            continue
+
+        tags = sorted(set(_doc_tags(front)) | set(request.tags or []))
+        # (3+4) SAFETY SCAN then PENDING candidate creation. create_checked scans
+        # the `memory_candidate` surface, masks secrets BEFORE the text is written
+        # anywhere, records a quarantine flag for injection / tool-control content,
+        # and writes status='pending' unconditionally.
+        harness = util.slug(f"{request.imported_by}-okf-{external_id}", 60)
+        try:
+            cid, sverdict = candmod.create_checked(
+                repo, claim_text,
+                proposed_by=request.imported_by,
+                proposed_by_type=request.imported_by_type,
+                source_ref=source_ref,
+                proposed_scopes=[scope],
+                tags=tags,
+                metadata=meta,
+                harness=harness)
+        except candmod.SafetyRefused as e:
+            # A safety BLOCK: nothing is stored. The attempt is recorded in the
+            # result and the audit log — never the raw unsafe span.
+            dr.outcome = "rejected"
+            dr.safety_kinds = e.result.kinds()
+            dr.detail = f"refused by safety policy: {e.result.reason()}"
+            result.rejected.append(rel)
+            result.documents.append(dr)
+            repo.log("okf-import-rejected",
+                     f"{rel} ({external_id}) refused: {e.result.reason()}")
+            continue
+        except (candmod.CandidateError, ingest.IngestError) as e:
+            dr.outcome = "rejected"
+            dr.detail = f"could not create candidate: {e}"
+            result.rejected.append(rel)
+            result.documents.append(dr)
+            continue
+
+        ref = refs.candidate(cid)
+        dr.candidate_ref = ref
+        dr.outcome = "updated" if is_update else "created"
+        dr.quarantined = candmod.safety.at_least(
+            sverdict.decision, candmod.safety.Decision.quarantine)
+        dr.redacted = sverdict.redacted
+        if not sverdict.clean:
+            dr.safety_kinds = sverdict.kinds()
+        (result.updated if is_update else result.created).append(ref)
+        if dr.quarantined:
+            result.quarantined.append(ref)
+        if dr.redacted:
+            result.redacted.append(ref)
+        detail = f"pending candidate {ref}"
+        if dr.quarantined:
+            detail += " [QUARANTINED]"
+        elif dr.redacted:
+            detail += " [redacted]"
+        dr.detail = detail
+        result.documents.append(dr)
+
+    _finalize(repo, request, result)
+    return result
+
+
+def _finalize(repo: Repo, request: ImportRequest, result: ImportResult) -> None:
+    """Record the import in the audit log. No-op writes are still auditable."""
+    if request.dry_run:
+        return
+    summary = (f"okf import from {result.bundle_dir} by {request.imported_by} "
+               f"({request.imported_by_type}) into {result.scope}: "
+               f"{len(result.created)} created, {len(result.updated)} updated, "
+               f"{len(result.duplicates)} duplicate, {len(result.conflicts)} conflict, "
+               f"{len(result.rejected)} rejected, "
+               f"{len(result.quarantined)} quarantined")
+    # create_checked already finalized each candidate; this is a summary line so an
+    # import that created nothing (all duplicates/conflicts/rejects) still leaves a
+    # provenance record that an import was ATTEMPTED.
+    repo.finalize("okf-import", summary)

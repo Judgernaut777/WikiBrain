@@ -4,8 +4,8 @@
 > of a BrainConnect ledger. It is not BrainConnect's database format, and it is not
 > a second source of truth.
 
-This document covers **Stage 1 (the exporter)** and **Stage 2 (the validator).**
-Import is a later stage and is stubbed at the end of this file.
+This document covers **Stage 1 (the exporter)**, **Stage 2 (the validator)**, and
+**Stage 3 (the importer)** — see the Import section at the end.
 
 ---
 
@@ -251,11 +251,97 @@ A Stage-1 export validates clean: `export okf` → `okf validate` is a structura
 round trip (asserted in the acceptance suite and demonstrated by
 `scripts/okf_validate_demo.py`, which also rejects a battery of hostile bundles).
 
-## Import — next stage
+## Import (Stage 3)
 
-`brainconnect import okf ./knowledge --by <human>` is **not implemented in this
-build**. Import will flow bundle → structural validation → source/provenance
-registration → safety scanning → candidate creation → normal human promotion.
-Imported documents become PENDING candidates, never auto-promoted; an external id
-can detect origin/duplication but can never overwrite a promoted claim without
-governance. `OKFAdapter.import_bundle` raises `NotImplementedError` today.
+    brainconnect import okf ./knowledge --scope repo:my-app --by matthew [--by-type human] [--dry-run] [--json]
+
+Import is the highest-risk stage and the most conservative one. Its entire
+authority is: **turn documents from an external bundle into PENDING memory
+candidates.** Nothing it does can produce trusted or promoted knowledge — that
+stays a separate, human-only step (see `docs/SAFETY.md`, LEDGER_SPEC §5.2).
+
+### The flow, in order
+
+1. **Structural validation** — the Stage-2 validator runs first. An invalid bundle
+   is refused **whole**: nothing is imported (no partial import). A hostile bundle
+   is inert input at this point, never executed.
+2. **Provenance registration** — for each claim document, import records bundle
+   path, a bundle checksum (the "source checksum"), the OKF version, the document
+   path, the external id, a per-document content checksum, the imported-at
+   timestamp, the importing actor and type, and the document's relative
+   relationships (`superseded_by`, `contradictions`). These land in the candidate's
+   `metadata.okf_import`.
+3. **Import safety scan** — every document's body runs through the existing
+   `memory_candidate` safety surface **before** it is stored anywhere. A secret is
+   **masked** before it can reach an inbox artifact or a candidate row;
+   injection / tool-control content is **quarantined** (accepted-but-quarantined,
+   needs a human override at promotion, exactly like a quarantined capture). No raw
+   unsafe span is ever written to a log or to recallable metadata.
+4. **Candidate creation** — a PENDING candidate, via the same `candidates.create_checked`
+   path a normal capture uses. There is no argument that makes it anything else.
+5. **Stop.** Human promotion is separate and unchanged.
+
+### Invariants (each one a critical bug if broken)
+
+- **No auto-promotion, ever.** Every created row is `status='pending'`. Import calls
+  `create_checked` and never `promote`.
+- **No bypass of the human gate.** An `agent` actor may *propose* an import — that is
+  what a candidate is for — but the resulting row is pending like any other. Nothing
+  in import can make an agent's content trusted. `--by-type agent` changes only the
+  recorded actor type, never the outcome.
+- **An external id confers no write authority over canonical state.** If an imported
+  document's external id already traces to a **promoted** claim, import **refuses to
+  touch that claim** and returns an explicit `conflict` requiring operator action. It
+  never edits, supersedes, or overwrites a canonical claim. (Because import only ever
+  writes pending candidates, a canonical claim is unreachable by construction; the
+  conflict check makes the refusal *explicit and visible* rather than silent.)
+- **OKF-valid is not trusted and is not safe.** A structurally valid bundle is still
+  untrusted, unsafe-until-scanned input. All bundle content is DATA, never
+  instructions.
+
+### The operator governs scope, not the bundle
+
+`--scope` sets the scope of every candidate the import creates. A document's own
+`scope:` field is retained only as informational metadata — a bundle that claims
+`global` scope can never land global recall on its own say-so.
+
+### Idempotency and conflict
+
+Identity is keyed on the **external id** (`brainconnect.id`), recorded as the
+candidate `source_ref` `okf:<id>`. Content change is detected by a per-document
+checksum.
+
+- **Duplicate** (same external id, same checksum): idempotent — no new candidate is
+  created; the existing one is reported. Re-importing a bundle N times produces no
+  duplication.
+- **Update** (same external id, *changed* content, and no promoted claim owns it): an
+  **explicit new PENDING candidate** is created and reported as an update, linked to
+  the prior candidate(s). Never a silent overwrite of the earlier candidate.
+- **Conflict** (the external id already owns a **promoted** claim): refused. An
+  explicit `conflict` result is returned for operator action; the canonical claim is
+  byte-for-byte unchanged. Resolving it (if the operator wants the new text) is done
+  through the normal claim-supersession governance path, **not** through import.
+
+External ids are namespaced by the *exporting* ledger; BrainConnect does not assume
+they are globally unique. A collision between two ledgers surfaces as an update or a
+conflict for human resolution — never a silent overwrite.
+
+### Import safety details
+
+Import reuses the `memory_candidate` safety surface rather than adding a new one:
+that surface already masks secrets before storage and quarantines injection /
+tool-control content, which is exactly import's requirement (see ADR 0006). A safety
+**block** (should a future engine map a category that way on this surface) stores
+nothing; the attempt is recorded in the result and the audit log, carrying finding
+*kinds* only — never the matched value.
+
+### What import is not
+
+No directory watching, no bidirectional sync, no auto-merge, no auto-supersede, no
+silent conflict resolution. Import is a one-shot, operator-invoked, human-gated
+intake — not a live mirror of an external store.
+
+A runnable demonstration is `scripts/okf_import_demo.py` (scratch DB): it imports a
+valid bundle to pending candidates, imports a secret (redacted) and an injection
+(quarantined), re-imports idempotently, refuses an external-id overwrite of a
+promoted claim, and shows an agent-actor import still landing only pending.
