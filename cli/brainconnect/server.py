@@ -216,13 +216,19 @@ class _Handler(BaseHTTPRequestHandler):
             "retryable": errors.RETRYABLE[code],
         }})
 
+    def _require_authorized(self) -> None:
+        """Raise the canonical `forbidden` refusal unless the bearer check passes.
+        Shared so the 403 message never drifts between the pre-parse gate in
+        `do_POST` and `_dispatch`."""
+        if not self._authorized():
+            raise candidates.ReviewerNotPermitted(
+                "this server requires a bearer token (Authorization header); "
+                "the credential supplied was missing or wrong")
+
     def _dispatch(self, handler) -> None:
         """Auth, execute, map every refusal to the canonical envelope."""
         try:
-            if not self._authorized():
-                raise candidates.ReviewerNotPermitted(
-                    "this server requires a bearer token (Authorization header); "
-                    "the credential supplied was missing or wrong")
+            self._require_authorized()
             with Repo.open(self.server.repo_root,
                            write_projections=False) as repo:
                 result = handler(repo)
@@ -288,6 +294,11 @@ class _Handler(BaseHTTPRequestHandler):
         url = urlsplit(self.path)
         promote = _PROMOTE_PATH.match(url.path)
         try:
+            # Fail closed first: authenticate from the headers BEFORE the request
+            # body is read or parsed, so an unauthenticated caller's bytes never
+            # reach the JSON parser (POST has no open route — every path here is
+            # credentialed; ToolConnect likewise authenticates before parsing).
+            self._require_authorized()
             if url.path == "/recall":
                 body = self._body()
                 self._dispatch(lambda repo: _recall(repo, body))

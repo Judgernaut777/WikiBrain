@@ -3932,6 +3932,25 @@ def main():
     check("the right bearer token admits the write",
           st == 200 and admitted.get("accepted") is True)
 
+    # -- fail closed BEFORE parsing (Wave-E regression) -------------------------
+    # An unauthenticated POST carrying a malformed body must be refused 403
+    # forbidden by the bearer gate — proving the auth check runs BEFORE the
+    # request body is read/parsed. Under the old order (`_body()` first) the
+    # broken JSON would surface as a 400 invalid_request, betraying that an
+    # unauthenticated caller's bytes had already reached the JSON parser.
+    st, pre = _http("POST", "/recall", raw=b"{ this is not json at all ]]",
+                    port=hport2)
+    check("an unauthenticated POST with a malformed body is 403 forbidden "
+          "(auth precedes parse), never a 400 parse error",
+          st == 403 and pre.get("error", {}).get("code") == "forbidden")
+    # The gate is authentication, not a blanket refusal: with the correct token
+    # that SAME malformed body now reaches the parser and is the honest 400.
+    st, post = _http("POST", "/recall", raw=b"{ this is not json at all ]]",
+                     token="sekrit-token", port=hport2)
+    check("with the token, that same malformed body is parsed and is 400 "
+          "invalid_request (so the 403 above came from auth, not parse)",
+          st == 400 and post.get("error", {}).get("code") == "invalid_request")
+
     httpd.shutdown(); httpd.server_close()
     httpd2.shutdown(); httpd2.server_close()
 
