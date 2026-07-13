@@ -223,17 +223,20 @@ def _resolve_profile(mapping: RoleMapping, overrides: dict[str, str]) -> str:
 
 
 def _independence_findings(assignments: list[dict]) -> list[dict]:
-    """Recommendations that each reviewer/verifier stay independent of each primary
-    producer (the implementer) it reviews.
+    """Recommendations that each reviewer/verifier stay independent of every
+    producer role (not only the primary-producer implementer) it might review.
 
-    Fully data-driven: it reads the `reviews` / `primary_producer` flags carried on
-    each assignment, never a role name. For every (reviewer, producer) pair it emits
-    a recommendation; `same_profile` is the elevated-risk collision flag (the two
-    share an AC profile, so AC might hand both to one agent). Deterministic order:
-    sorted by (reviewer_role, producer_role).
+    Fully data-driven: it reads the `reviews` flag and `role_kind` carried on each
+    assignment, never a role name. The producer set is EVERY role whose kind is
+    `KIND_PRODUCER` (implementer, research_agent, integration_agent, …) — not just
+    the single `primary_producer` implementer — so a reviewer/verifier that shares
+    ANY producer role's AC profile is surfaced. For every (reviewer, producer) pair
+    it emits a recommendation; `same_profile` is the elevated-risk collision flag
+    (the two share an AC profile, so AC might hand both to one agent). Deterministic
+    order: sorted by (reviewer_role, producer_role).
     """
     reviewers = [a for a in assignments if a["reviews"]]
-    producers = [a for a in assignments if a["primary_producer"]]
+    producers = [a for a in assignments if a["role_kind"] == KIND_PRODUCER]
     findings: list[dict] = []
     for r in reviewers:
         for p in producers:
@@ -298,6 +301,16 @@ def assign_roles(repo: Repo, task_id: str, roles, *,
                 f"expected one of {', '.join(sorted(AC_PROFILES))}")
 
     requested = list(roles or [])
+    # An EMPTY role request is a clean no-op / soft-refusal: there is nothing to
+    # map, so BC does NOT file a vacuous "0 role(s) mapped" provenance candidate.
+    # It is signalled clearly (ok=False + an explanatory note) and never raises.
+    if not requested:
+        return RoleAssignmentResult(
+            task_id=str(task_id).strip(),
+            assignments=[], refused_roles=[], independence=[], collisions=[],
+            ok=False, provenance_ref=None,
+            errors=["empty role request: nothing to map — no-op, no provenance "
+                    "candidate recorded"])
     assignments: list[dict] = []
     refused: list[dict] = []
     seen: set[str] = set()

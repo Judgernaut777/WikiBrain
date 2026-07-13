@@ -5354,9 +5354,12 @@ def _roles_checks():
 
     # -- reviewer independence: distinct-profile default recommends, same-profile
     #    override FLAGS a collision (a recommendation, never BC enforcement) -----
-    check("roles: with the DEFAULT data, no reviewer/verifier shares the "
-          "implementer's profile — independence-clean, zero collisions",
-          res.collisions == [] and len(res.independence) == 4
+    # Independence is checked against EVERY producer role (implementer,
+    # research_agent, integration_agent), so 4 reviewers x 3 producers = 12
+    # recommendations — all collision-free under the default DATA table.
+    check("roles: with the DEFAULT data, no reviewer/verifier shares ANY producer "
+          "role's profile — independence-clean, zero collisions",
+          res.collisions == [] and len(res.independence) == 12
           and all(f["same_profile"] is False for f in res.independence))
     with Repo.open(start=rlroot) as r:
         collided = rolesmod.assign_roles(
@@ -5375,6 +5378,34 @@ def _roles_checks():
           "still maps the roles and records (does not enforce/refuse)",
           collided.ok is True and len(collided.assignments) == 2
           and collided.provenance_ref is not None)
+    # -- independence covers NON-implementer producers too (fix): a reviewer sharing
+    #    a KIND_PRODUCER-but-not-primary role's profile (research/integration_agent)
+    #    is FLAGGED, where the old primary_producer-only producer set missed it -----
+    with Repo.open(start=rlroot) as r:
+        nonimpl = rolesmod.assign_roles(
+            r, "task-nonimpl-producer", ["integration_agent", "security_reviewer"],
+            profile_overrides={"security_reviewer": "general_coder"})
+    _ni_coll = [c for c in nonimpl.collisions
+                if c["implementer_role"] == "integration_agent"]
+    check("roles: a reviewer sharing a NON-implementer producer role's profile "
+          "(integration_agent, a KIND_PRODUCER that is not primary_producer) is "
+          "FLAGGED as an independence collision — previously never checked",
+          len(_ni_coll) == 1
+          and _ni_coll[0]["reviewer_role"] == "security_reviewer"
+          and _ni_coll[0]["same_profile"] is True
+          and "MUST assign a DISTINCT agent" in _ni_coll[0]["recommendation"])
+    # The producer set is EVERY producer role: without any override the same pair is
+    # collision-free, so the flag comes from the shared PROFILE, not the role name.
+    with Repo.open(start=rlroot) as r:
+        nonimpl_clean = rolesmod.assign_roles(
+            r, "task-nonimpl-clean", ["integration_agent", "security_reviewer"])
+    check("roles: the same integration_agent + security_reviewer pair is "
+          "collision-free under the DEFAULT table (fix stays data-driven, not a "
+          "role-name branch)",
+          nonimpl_clean.collisions == []
+          and any(f["implementer_role"] == "integration_agent"
+                  and f["reviewer_role"] == "security_reviewer"
+                  and f["same_profile"] is False for f in nonimpl_clean.independence))
 
     # -- unknown role is FAIL-CLOSED (refused, never silently mapped) ------------
     with Repo.open(start=rlroot) as r:
@@ -5394,6 +5425,24 @@ def _roles_checks():
           "(fail-closed, no silent success)",
           allbad.ok is False and allbad.assignments == []
           and len(allbad.refused_roles) == 2)
+    # -- an EMPTY role request is a clean no-op: NO vacuous provenance recorded ----
+    with Repo.open(start=rlroot) as r:
+        _n_before = r.one("SELECT COUNT(*) n FROM memory_candidates")["n"]
+        empty = rolesmod.assign_roles(r, "task-empty", [])
+        _n_after = r.one("SELECT COUNT(*) n FROM memory_candidates")["n"]
+    check("roles: an EMPTY role request is a soft-refusal no-op — ok=False, maps "
+          "nothing, records NO provenance candidate, and does not crash",
+          empty.ok is False and empty.assignments == [] and empty.refused_roles == []
+          and empty.provenance_ref is None and _n_after == _n_before
+          and any("empty role request" in e for e in empty.errors))
+    # None (no roles at all) is the same clean no-op, never a vacuous record.
+    with Repo.open(start=rlroot) as r:
+        _n_before2 = r.one("SELECT COUNT(*) n FROM memory_candidates")["n"]
+        empty_none = rolesmod.assign_roles(r, "task-empty-none", None)
+        _n_after2 = r.one("SELECT COUNT(*) n FROM memory_candidates")["n"]
+    check("roles: a None role request is the same no-op (ok=False, no candidate)",
+          empty_none.ok is False and empty_none.provenance_ref is None
+          and _n_after2 == _n_before2)
     # A bad override (unknown profile / unknown role) is a hard fail-closed error.
     check("roles: an override to a non-existent AC profile is refused (RoleError, "
           "fail-closed — never silently applied)",
