@@ -18,6 +18,7 @@ import inspect
 import json
 import os
 import shutil as _shutil
+import struct as _struct
 import sys
 import tempfile
 import warnings as _warnings
@@ -570,43 +571,51 @@ def main():
 
     # Mixed-model embeddings: stub the encoder (no [semantic] extra needed) and
     # verify semantic_search only ranks vectors from the CURRENT model, ignoring
-    # rows from a different model or with a mismatched dim.
-    import numpy as _npt
-    mmtmp = Path(tempfile.mkdtemp(prefix="wikibrain-mixedmodel-"))
-    mmroot = make_repo(mmtmp)
-    write(mmroot / "mm.md", "src")
-    with Repo.open(start=mmroot) as r:
-        mmsid, _ = ingest.add(r, str(mmroot / "mm.md"), origin="clip", title="mm")
-        for txt in ("old-model claim", "current-model claim", "mismatched-dim claim"):
-            r.ex("INSERT INTO claims(text, source_id, confidence, origin, status, "
-                 "created_at) VALUES (?, ?, 0.9, 'clip', 'promoted', '2026-01-01T00:00:00Z')",
-                 (txt, mmsid))
-        r.conn.commit()
-        cids = {row["text"]: row["id"] for row in r.q("SELECT id, text FROM claims")}
-        cur_name = embedmod._model_name(r)
-        v3 = _npt.asarray([1.0, 0.0, 0.0], dtype=_npt.float32).tobytes()
-        v2 = _npt.asarray([1.0, 0.0], dtype=_npt.float32).tobytes()
-        r.ex("INSERT INTO embeddings(claim_id, model, dim, vec, created_at) VALUES (?,?,?,?,?)",
-             (cids["old-model claim"], "some-other-model", 3, v3, "2026-01-01T00:00:00Z"))
-        r.ex("INSERT INTO embeddings(claim_id, model, dim, vec, created_at) VALUES (?,?,?,?,?)",
-             (cids["current-model claim"], cur_name, 3, v3, "2026-01-01T00:00:00Z"))
-        r.ex("INSERT INTO embeddings(claim_id, model, dim, vec, created_at) VALUES (?,?,?,?,?)",
-             (cids["mismatched-dim claim"], cur_name, 2, v2, "2026-01-01T00:00:00Z"))
-        r.conn.commit()
-        _orig_model = embedmod._model
-        embedmod._model = lambda name: _types.SimpleNamespace(
-            encode=lambda texts, normalize_embeddings=True: [[1.0, 0.0, 0.0]])
-        try:
-            mm_hits = embedmod.semantic_search(r, "q", k=10)
-        finally:
-            embedmod._model = _orig_model
-    mm_ids = {h["id"] for h in mm_hits}
-    check("semantic_search excludes vectors from a different model",
-          cids["old-model claim"] not in mm_ids)
-    check("semantic_search excludes dim-mismatched vectors",
-          cids["mismatched-dim claim"] not in mm_ids)
-    check("semantic_search ranks only the current-model claim",
-          mm_ids == {cids["current-model claim"]})
+    # rows from a different model or with a mismatched dim. The ranking itself
+    # still needs numpy (it ships with [semantic]; the core install runs
+    # without it), so this block self-skips when numpy is absent.
+    try:
+        import numpy as _npt
+    except ImportError:
+        _npt = None
+    if _npt is None:
+        print("    (mixed-model check skipped — numpy absent; install [semantic])")
+    else:
+        mmtmp = Path(tempfile.mkdtemp(prefix="wikibrain-mixedmodel-"))
+        mmroot = make_repo(mmtmp)
+        write(mmroot / "mm.md", "src")
+        with Repo.open(start=mmroot) as r:
+            mmsid, _ = ingest.add(r, str(mmroot / "mm.md"), origin="clip", title="mm")
+            for txt in ("old-model claim", "current-model claim", "mismatched-dim claim"):
+                r.ex("INSERT INTO claims(text, source_id, confidence, origin, status, "
+                     "created_at) VALUES (?, ?, 0.9, 'clip', 'promoted', '2026-01-01T00:00:00Z')",
+                     (txt, mmsid))
+            r.conn.commit()
+            cids = {row["text"]: row["id"] for row in r.q("SELECT id, text FROM claims")}
+            cur_name = embedmod._model_name(r)
+            v3 = _npt.asarray([1.0, 0.0, 0.0], dtype=_npt.float32).tobytes()
+            v2 = _npt.asarray([1.0, 0.0], dtype=_npt.float32).tobytes()
+            r.ex("INSERT INTO embeddings(claim_id, model, dim, vec, created_at) VALUES (?,?,?,?,?)",
+                 (cids["old-model claim"], "some-other-model", 3, v3, "2026-01-01T00:00:00Z"))
+            r.ex("INSERT INTO embeddings(claim_id, model, dim, vec, created_at) VALUES (?,?,?,?,?)",
+                 (cids["current-model claim"], cur_name, 3, v3, "2026-01-01T00:00:00Z"))
+            r.ex("INSERT INTO embeddings(claim_id, model, dim, vec, created_at) VALUES (?,?,?,?,?)",
+                 (cids["mismatched-dim claim"], cur_name, 2, v2, "2026-01-01T00:00:00Z"))
+            r.conn.commit()
+            _orig_model = embedmod._model
+            embedmod._model = lambda name: _types.SimpleNamespace(
+                encode=lambda texts, normalize_embeddings=True: [[1.0, 0.0, 0.0]])
+            try:
+                mm_hits = embedmod.semantic_search(r, "q", k=10)
+            finally:
+                embedmod._model = _orig_model
+        mm_ids = {h["id"] for h in mm_hits}
+        check("semantic_search excludes vectors from a different model",
+              cids["old-model claim"] not in mm_ids)
+        check("semantic_search excludes dim-mismatched vectors",
+              cids["mismatched-dim claim"] not in mm_ids)
+        check("semantic_search ranks only the current-model claim",
+              mm_ids == {cids["current-model claim"]})
 
     # ---------------- Dump scaling (#7) ----------------
     print("[dump] embeddings row DATA excluded from db/dump.sql")
@@ -620,7 +629,7 @@ def main():
              (dsid,))
         r.conn.commit()
         dcid = r.one("SELECT id FROM claims WHERE text='dumped claim'")["id"]
-        vec = _npt.asarray([1.0, 0.0, 0.0], dtype=_npt.float32).tobytes()
+        vec = _struct.pack("<3f", 1.0, 0.0, 0.0)  # a float32 blob; no numpy needed
         r.ex("INSERT INTO embeddings(claim_id, model, dim, vec, created_at) VALUES (?,?,?,?,?)",
              (dcid, "m", 3, vec, "2026-01-01T00:00:00Z"))
         r.finalize("embed", "test embed for dump")
@@ -2527,7 +2536,10 @@ def main():
     _repo_root = Path(__file__).resolve().parents[1]
     bc_sh = _repo_root / "brainconnect.sh"
     check("POSIX brainconnect.sh wrapper exists at the repo root", bc_sh.is_file())
-    check("brainconnect.sh is executable", bc_sh.stat().st_mode & 0o111 != 0)
+    if os.name == "nt":
+        print("    (exec-bit checks skipped — NTFS carries no POSIX exec bit)")
+    else:
+        check("brainconnect.sh is executable", bc_sh.stat().st_mode & 0o111 != 0)
     check("no bare 'wiki' file at the repo root "
           "(it would collide with the generated wiki/ vault dir)",
           not (_repo_root / "wiki").exists())
@@ -2539,7 +2551,8 @@ def main():
 
     mech_sh = _repo_root / "scripts" / "mechanical-maintain.sh"
     check("POSIX mechanical-maintain.sh exists beside the .ps1", mech_sh.is_file())
-    check("mechanical-maintain.sh is executable", mech_sh.stat().st_mode & 0o111 != 0)
+    if os.name != "nt":
+        check("mechanical-maintain.sh is executable", mech_sh.stat().st_mode & 0o111 != 0)
 
     readme_text = (_repo_root / "README.md").read_text(encoding="utf-8")
     check("README documents a POSIX venv setup block",
@@ -3222,9 +3235,12 @@ def main():
     freshdir = Path(tempfile.mkdtemp(prefix="wikibrain-freshinit-"))
     fake_home = Path(tempfile.mkdtemp(prefix="wikibrain-freshinit-home-"))
     prev_cwd = os.getcwd()
-    prev_home = os.environ.get("HOME")
+    # Both spellings: POSIX Path.home() reads HOME, Windows reads USERPROFILE
+    # (same idiom as the skills global-install block above).
+    prev_home = {k: os.environ.get(k) for k in ("HOME", "USERPROFILE")}
     os.chdir(freshdir)
     os.environ["HOME"] = str(fake_home)
+    os.environ["USERPROFILE"] = str(fake_home)
     try:
         init_ok = True
         try:
@@ -3278,10 +3294,11 @@ def main():
               == _cfg_before + "# user edit\n")
     finally:
         os.chdir(prev_cwd)
-        if prev_home is None:
-            os.environ.pop("HOME", None)
-        else:
-            os.environ["HOME"] = prev_home
+        for _k, _v in prev_home.items():
+            if _v is None:
+                os.environ.pop(_k, None)
+            else:
+                os.environ[_k] = _v
 
     # (3) `brainconnect-librarian status` surfaces reachability (+ why not) from
     # client.reachable(), stubbed offline — never a live network call.
@@ -3997,6 +4014,58 @@ def main():
     check("with the token, that same malformed body is parsed and is 400 "
           "invalid_request (so the 403 above came from auth, not parse)",
           st == 400 and post.get("error", {}).get("code") == "invalid_request")
+
+    # -- EF-3 regression: pre-parse refusals must not corrupt keep-alive --------
+    # protocol_version is HTTP/1.1, so connections persist. A refusal answered
+    # BEFORE the body is read (the 403 above, an unknown POST path) must still
+    # DRAIN that body, or its unread bytes get parsed as the next request line
+    # on the same socket. urllib opens a fresh connection per call and cannot
+    # see this; http.client reuses its socket like any pooling client.
+    import http.client as _hclient
+    _ka = _hclient.HTTPConnection("127.0.0.1", hport2, timeout=10)
+    _ka.request("POST", "/recall", body=b'{"query":"x","limit":3}',
+                headers={"Content-Type": "application/json"})
+    _r1 = _ka.getresponse(); _r1.read()
+    _ka.request("GET", "/health")
+    _r2 = _ka.getresponse()
+    _ka_health = json.loads(_r2.read().decode("utf-8")) if _r2.status == 200 else {}
+    _ka.close()
+    check("an unauthenticated POST (403) drains its unread body: the next "
+          "request on the same keep-alive connection still answers",
+          _r1.status == 403 and _r2.status == 200
+          and _ka_health.get("service") == "brainconnect")
+    _ka2 = _hclient.HTTPConnection("127.0.0.1", hport2, timeout=10)
+    _ka2.request("POST", "/nope", body=b'{"query":"x"}',
+                 headers={"Content-Type": "application/json",
+                          "Authorization": "Bearer sekrit-token"})
+    _r3 = _ka2.getresponse(); _r3.read()
+    _ka2.request("GET", "/health")
+    _r4 = _ka2.getresponse(); _r4.read()
+    _ka2.close()
+    check("an unknown POST path (404) drains its unread body too, keeping the "
+          "connection parseable",
+          _r3.status == 404 and _r4.status == 200)
+    # An oversized body is refused WITHOUT reading it, and draining that much
+    # is unsafe — so the refusal must close the connection instead.
+    _ka3 = _hclient.HTTPConnection("127.0.0.1", hport2, timeout=10)
+    _ka3.putrequest("POST", "/recall")
+    _ka3.putheader("Authorization", "Bearer sekrit-token")
+    _ka3.putheader("Content-Length", str(srvmod.MAX_BODY_BYTES + 1))
+    _ka3.endheaders()  # headers only; the declared body is never sent
+    _r5 = _ka3.getresponse()
+    _over = json.loads(_r5.read().decode("utf-8"))
+    _closed = False
+    try:
+        _ka3.request("GET", "/health")
+        _ka3.getresponse().read()
+    except (_hclient.HTTPException, OSError):
+        _closed = True
+    _ka3.close()
+    check("an oversized body is refused 400 unread AND the refusal closes the "
+          "connection (draining it would be unsafe)",
+          _r5.status == 400
+          and _over.get("error", {}).get("code") == "invalid_request"
+          and _closed)
 
     httpd.shutdown(); httpd.server_close()
     httpd2.shutdown(); httpd2.server_close()

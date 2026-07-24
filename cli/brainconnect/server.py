@@ -245,6 +245,10 @@ class _Handler(BaseHTTPRequestHandler):
         except ValueError:
             raise api.ApiError("request requires a Content-Length header") from None
         if length > MAX_BODY_BYTES:
+            # Refused before reading, and draining this much is unsafe — so the
+            # refusal must close the connection instead of leaving the unread
+            # body to be misread as the next request line (see _drain_body).
+            self.close_connection = True
             raise api.ApiError(
                 f"request body exceeds {MAX_BODY_BYTES} bytes")
         raw = self.rfile.read(length) if length else b""
@@ -255,6 +259,19 @@ class _Handler(BaseHTTPRequestHandler):
         if not isinstance(payload, dict):
             raise api.ApiError("request body must be a JSON object")
         return payload
+
+    def _drain_body(self) -> None:
+        """Read and discard a body the client may have sent, so an HTTP/1.1
+        keep-alive connection stays parseable for the next request. Required
+        before answering any refusal issued WITHOUT reading the body (auth,
+        route miss, unknown method): the unread bytes would otherwise be
+        parsed as the next request line on the same connection."""
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            length = 0
+        if 0 < length <= MAX_BODY_BYTES:
+            self.rfile.read(length)
 
     def _not_found(self, path: str) -> None:
         # Synthesized from the same vocabulary `errors.envelope` uses; a route
@@ -298,14 +315,7 @@ class _Handler(BaseHTTPRequestHandler):
         is the honest code from the existing taxonomy: the caller must send a
         different request (GET or POST), and retrying the same one is useless.
         """
-        # Drain a body the client may have sent, so an HTTP/1.1 keep-alive
-        # connection stays parseable for the next request.
-        try:
-            length = int(self.headers.get("Content-Length") or 0)
-        except ValueError:
-            length = 0
-        if 0 < length <= MAX_BODY_BYTES:
-            self.rfile.read(length)
+        self._drain_body()
         code = errors.INVALID_REQUEST
         self._send(errors.HTTP_STATUS[code], {"error": {
             "code": code,
@@ -358,7 +368,13 @@ class _Handler(BaseHTTPRequestHandler):
             # body is read or parsed, so an unauthenticated caller's bytes never
             # reach the JSON parser (POST has no open route — every path here is
             # credentialed; ToolConnect likewise authenticates before parsing).
-            self._require_authorized()
+            # A refused body is still drained — read and discarded, never
+            # parsed — so the 403 does not corrupt a keep-alive connection.
+            try:
+                self._require_authorized()
+            except candidates.ReviewerNotPermitted:
+                self._drain_body()
+                raise
             if url.path == "/recall":
                 body = self._body()
                 self._dispatch(lambda repo: _recall(repo, body))
@@ -373,6 +389,7 @@ class _Handler(BaseHTTPRequestHandler):
                 cid = promote.group(1)
                 self._dispatch(lambda repo: _promote(repo, cid, body))
             else:
+                self._drain_body()  # unrouted body: never parsed, still drained
                 self._not_found(url.path)
         except Exception as exc:  # noqa: BLE001 — a malformed body must still wear the envelope
             self._refuse(exc)

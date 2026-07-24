@@ -480,6 +480,11 @@ def import_bundle(repo: Repo, request: ImportRequest) -> ImportResult:
         except UnicodeDecodeError:
             result.warnings.append(f"could not decode {rel} as UTF-8; skipped")
             continue
+        # A Windows-authored bundle arrives with CRLF line endings; normalize
+        # before parsing so the stored body is line-ending-independent (the
+        # same posture validate.py documents for its own splitting). The
+        # checksum above stays over the raw bytes.
+        text = text.replace("\r\n", "\n")
 
         front = _parse_front(text, limits)
         bc = front.get("brainconnect") if isinstance(front, dict) else None

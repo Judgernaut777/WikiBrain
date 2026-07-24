@@ -81,8 +81,11 @@ class _Ledger:
         for d in ("inbox", "raw", "db", "wiki"):
             (self.root / d).mkdir()
         self.db = Path(self._tmp) / "ledger.db"
+        # as_posix(): a raw Windows path inside a TOML basic string is an escape
+        # sequence (C:\Users -> \U = "Invalid hex value"); forward slashes parse
+        # everywhere and the config loader resolves them fine.
         (self.root / "config.toml").write_text(
-            f'[paths]\ndb = "{self.db}"\n', encoding="utf-8")
+            f'[paths]\ndb = "{self.db.as_posix()}"\n', encoding="utf-8")
         self._prior = os.environ.get("BRAINCONNECT_DB")
         os.environ["BRAINCONNECT_DB"] = str(self.db)
         init_db(self.db)
